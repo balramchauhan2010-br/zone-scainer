@@ -1,11 +1,42 @@
 # -*- coding: utf-8 -*-
 """
-zone_core.py  — v2 INSTITUTIONAL (ALL 4 PATTERNS, FULL VALIDATION)
+zone_core.py — v3 (STRICT RULE-BASED: LEG-IN / BASE / LEG-OUT)
 ==========================================================================
 DBR (Demand/Reversal) | RBR (Demand/Continuation) |
 RBD (Supply/Reversal) | DBD (Supply/Continuation)
 
 हर zone: patternType ("DBR"/"RBR"/"RBD"/"DBD"), zoneCategory ("Reversal"/"Continuation")
+
+------------------------------------------------------------------
+LEG IN VALIDATION
+------------------------------------------------------------------
+  ✅ Direction: Pattern के अनुसार Bullish/Bearish
+  ✅ CLV (Close Location Value) ≥ 60%
+       🟢 Bullish: (Close - Low) / (High - Low) ≥ 0.60
+       🔴 Bearish: (High - Close) / (High - Low) ≥ 0.60
+  ✅ True Range ≥ 0.8 × ATR
+  ✅ TR > Max Base TR (Hierarchy)
+  ✅ TR ≥ 2.0 × Max Base TR (legInMinMultOfBase)
+
+------------------------------------------------------------------
+BASE VALIDATION (1-3 Candles)
+------------------------------------------------------------------
+  ✅ Count: minBaseCount=1 से maxBaseCount=3
+  ✅ हर Candle: TR ≤ 1.0 × ATR (maxBaseAtrMult)
+
+------------------------------------------------------------------
+LEG OUT VALIDATION
+------------------------------------------------------------------
+  ✅ Explosive: TR ≥ 1.2 × ATR (legOutAtrMult)
+  ✅ HQ Threshold: TR ≥ 2.0 × ATR → +25 Density Score
+  ✅ Wick % ≤ 25% (legOutMaxWickPct) — Strong Close
+  ✅ TR Hierarchy: LegOut > LegIn > MaxBaseTR
+  ✅ BOS (Break of Structure):
+       🟢 Demand: Close > Max(LegInHigh, MaxBaseHigh)
+       🔴 Supply: Close < Min(LegInLow, MinBaseLow)
+       🟢 Demand: Low > MaxBaseHigh OR Close > LegInHigh
+       🔴 Supply: High < MinBaseLow OR Close < LegInLow
+  ✅ Volume > Leg In Volume
 
 Public entry points:
     scan_zones(df, params=None)              -> List[Zone]
@@ -20,36 +51,29 @@ import pandas as pd
 
 
 DEFAULT_PARAMS = dict(
+    # --- General ---
     targetRR=5.0,
     slBufferAtr=0.1,
     atrPeriod=14,
-    legOutAtrMult=1.2,
-    hqLegOutAtr=2.0,
-    maxBaseAtrMult=1.0,
-    legOutMaxWickPct=0.25,
-    legInMaxWickPct=0.35,
-    legInMinClvPct=0.60,
-    useSweepFilter=True,
-    requireSweepRejectionClose=True,
-    useImbalance=True,
+
+    # --- Base rules ---
     minBaseCount=1,
     maxBaseCount=3,
-    reqLegInVol=True,
-    legInMinMultOfBase=2.0,
-    baseMaxBodyRatio=0.35,
-    baseMinOverlapPct=0.50,
-    baseVolMaxRatio=1.0,
-    baseContractionBonus=True,
-    legOutVolLookback=20,
-    legOutVolMult=1.5,
-    legacyProximalDistal=False,
+    maxBaseAtrMult=1.0,        # हर base candle: TR ≤ 1.0 × ATR
+
+    # --- Leg-In rules ---
+    legInMinAtrMult=0.8,       # TR ≥ 0.8 × ATR
+    legInMinMultOfBase=2.0,    # TR ≥ 2.0 × MaxBaseTR
+    legInMinClvPct=0.60,       # CLV ≥ 60%
+
+    # --- Leg-Out rules ---
+    legOutAtrMult=1.2,         # Explosive: TR ≥ 1.2 × ATR
+    hqLegOutAtr=2.0,           # HQ Threshold: TR ≥ 2.0 × ATR
+    legOutMaxWickPct=0.25,     # Wick % ≤ 25%
+
+    # --- Proximal/Distal & risk ---
     legInInclusionFactor=0.35,
-    riskAtrMin=0.30,
-    riskAtrMax=4.00,
-    touchDecayPerTest=15,
-    curveExtensionAtrMax=7.0,
-    curveExtensionPenalty=20,
-    enableRoleReversal=False,
+    legacyProximalDistal=False,
 )
 
 _HARD_MAX_BASE_COUNT = 3
@@ -69,13 +93,15 @@ class Zone:
     state: str = "Fresh"
     touchCount: int = 0
     originalDensityScore: int = 0
-    flipped: bool = False
     startBarIndex: int = 0
     createdBarIndex: int = 0
     baseCount: int = 0
     timestamp: object = None
 
 
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
 def _wilder_atr(high, low, close, period):
     n = len(high)
     tr = np.empty(n)
@@ -99,33 +125,9 @@ def _wilder_atr(high, low, close, period):
     return atr
 
 
-def _pivots(high, low, left=5, right=5):
-    n = len(high)
-    swing_high = np.full(n, np.nan)
-    swing_low = np.full(n, np.nan)
-    window = left + right + 1
-    if n < window:
-        return swing_high, swing_low
-    from numpy.lib.stride_tricks import sliding_window_view
-    hw = sliding_window_view(high, window)
-    lw = sliding_window_view(low, window)
-    centers_h = high[left: n - right]
-    centers_l = low[left: n - right]
-    max_h = hw.max(axis=1)
-    min_l = lw.min(axis=1)
-    count_max = (hw == max_h[:, None]).sum(axis=1)
-    count_min = (lw == min_l[:, None]).sum(axis=1)
-    is_pivot_h = (centers_h == max_h) & (count_max == 1)
-    is_pivot_l = (centers_l == min_l) & (count_min == 1)
-    idx = np.arange(left, n - right)
-    confirm_idx = idx + right
-    swing_high[confirm_idx[is_pivot_h]] = centers_h[is_pivot_h]
-    swing_low[confirm_idx[is_pivot_l]] = centers_l[is_pivot_l]
-    return swing_high, swing_low
-
-
-def _causal_last(values):
-    return pd.Series(values).ffill().to_numpy()
+def _clv_bullish(o, h, l, c):
+    rng = h - l
+    return 0.0 if rng <= 0 else (c - l) / rng
 
 
 def _clv_bearish(o, h, l, c):
@@ -133,11 +135,9 @@ def _clv_bearish(o, h, l, c):
     return 0.0 if rng <= 0 else (h - c) / rng
 
 
-def _clv_bullish(o, h, l, c):
-    rng = h - l
-    return 0.0 if rng <= 0 else (c - l) / rng
-
-
+# --------------------------------------------------------------------------
+# Core scan
+# --------------------------------------------------------------------------
 def scan_zones(df: pd.DataFrame, params: Optional[dict] = None) -> List[Zone]:
     p = dict(DEFAULT_PARAMS)
     if params:
@@ -156,33 +156,31 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None) -> List[Zone]:
     minBaseCount = p["minBaseCount"]
     maxBaseCount = p["maxBaseCount"]
     atrPeriod = p["atrPeriod"]
-    legInMinMultOfBase = p["legInMinMultOfBase"]
     legacy = p["legacyProximalDistal"]
     legInInclusionFactor = p["legInInclusionFactor"]
 
     atr = _wilder_atr(h, l, c, atrPeriod)
-    swing_high_raw, swing_low_raw = _pivots(h, l, 5, 5)
-    lastSwingHigh = _causal_last(swing_high_raw)
-    lastSwingLow = _causal_last(swing_low_raw)
 
-    def tr(t, idx): return h[t - idx] - l[t - idx]
-    def is_bull(t, idx): return c[t - idx] > o[t - idx]
-    def is_bear(t, idx): return o[t - idx] > c[t - idx]
+    def tr(t, idx):
+        return h[t - idx] - l[t - idx]
+
+    def is_bull(t, idx):
+        return c[t - idx] > o[t - idx]
+
+    def is_bear(t, idx):
+        return o[t - idx] > c[t - idx]
 
     def wick_pct(t, idx):
         i = t - idx
         rng = h[i] - l[i]
-        if rng == 0: return 0.0
+        if rng == 0:
+            return 0.0
         wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
         return wicks / rng
 
     zones: List[Zone] = []
     active_zones: List[Zone] = []
     min_start = max(atrPeriod, maxBaseCount + 2, 11)
-
-    vol_series = pd.Series(v)
-    lookback = p["legOutVolLookback"]
-    rolling_avg_vol = vol_series.rolling(lookback, min_periods=1).mean().shift(1).to_numpy()
 
     for t in range(min_start, n):
         if np.isnan(atr[t]):
@@ -201,20 +199,13 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None) -> List[Zone]:
             if np.isnan(atr[t - legInIdx]):
                 continue
 
-            legOutTR = tr(t, legOutIdx)
-            legInTR = tr(t, legInIdx)
-            legInLow = l[t - legInIdx]
-            legInHigh = h[t - legInIdx]
-            legInOpen = o[t - legInIdx]
-            legInClose = c[t - legInIdx]
-
+            # ---------------- BASE VALIDATION ----------------
             allBaseValid = True
             maxBaseTR = 0.0
             maxBaseHigh = -1.0
-            minBaseLow = 999999.0
+            minBaseLow = float("inf")
             baseBodyHighMax = -1.0
-            baseBodyLowMin = 999999.0
-            base_trs = []
+            baseBodyLowMin = float("inf")
             base_ok = True
 
             for b in range(1, baseCount + 1):
@@ -222,242 +213,208 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None) -> List[Zone]:
                     base_ok = False
                     break
                 bTR = tr(t, b)
-                base_trs.append(bTR)
-                if bTR > maxBaseTR: maxBaseTR = bTR
-                if bTR > (p["maxBaseAtrMult"] * atr[t - b]): allBaseValid = False
-                if h[t - b] > maxBaseHigh: maxBaseHigh = h[t - b]
-                if l[t - b] < minBaseLow: minBaseLow = l[t - b]
+                if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
+                    allBaseValid = False
+                if bTR > maxBaseTR:
+                    maxBaseTR = bTR
+                if h[t - b] > maxBaseHigh:
+                    maxBaseHigh = h[t - b]
+                if l[t - b] < minBaseLow:
+                    minBaseLow = l[t - b]
                 bodyHigh = max(o[t - b], c[t - b])
                 bodyLow = min(o[t - b], c[t - b])
-                if bodyHigh > baseBodyHighMax: baseBodyHighMax = bodyHigh
-                if bodyLow < baseBodyLowMin: baseBodyLowMin = bodyLow
-            if not base_ok:
+                if bodyHigh > baseBodyHighMax:
+                    baseBodyHighMax = bodyHigh
+                if bodyLow < baseBodyLowMin:
+                    baseBodyLowMin = bodyLow
+
+            if not base_ok or not allBaseValid or maxBaseTR <= 0:
                 continue
 
-            base_body_ratio_ok = True
-            for b in range(1, baseCount + 1):
-                bh, bl = h[t - b], l[t - b]
-                rng = bh - bl
-                if rng <= 0: continue
-                body = abs(c[t - b] - o[t - b])
-                if (body / rng) > p["baseMaxBodyRatio"]:
-                    base_body_ratio_ok = False
-                    break
-
-            base_overlap_ok = True
-            if baseCount >= 2:
-                for b in range(1, baseCount):
-                    h1, l1 = h[t - b], l[t - b]
-                    h2, l2 = h[t - (b + 1)], l[t - (b + 1)]
-                    overlap = min(h1, h2) - max(l1, l2)
-                    min_rng = min(h1 - l1, h2 - l2)
-                    if min_rng <= 0 or (overlap / min_rng) < p["baseMinOverlapPct"]:
-                        base_overlap_ok = False
-                        break
-
-            base_vol_ok = True
-            if baseCount >= 1:
-                base_vols = [v[t - b] for b in range(1, baseCount + 1)]
-                avg_base_vol = sum(base_vols) / len(base_vols)
-                if avg_base_vol > (p["baseVolMaxRatio"] * v[t - legInIdx]):
-                    base_vol_ok = False
-
-            base_is_contracting = False
-            if p["baseContractionBonus"] and len(base_trs) >= 2:
-                base_is_contracting = all(
-                    base_trs[i] >= base_trs[i + 1] * 0.9 for i in range(len(base_trs) - 1)
-                )
-
-            validLegIn = True
-            if p["reqLegInVol"]:
-                validLegIn = (
-                    v[t - legInIdx] >= v[t - legInIdx - 1] * 0.8
-                    and legInTR >= 0.8 * atr[t - legInIdx]
-                )
-            if maxBaseTR <= 0 or legInTR < (legInMinMultOfBase * maxBaseTR):
-                validLegIn = False
-            if wick_pct(t, legInIdx) > p["legInMaxWickPct"]:
-                validLegIn = False
+            # ---------------- LEG IN VALIDATION ----------------
+            legInTR = tr(t, legInIdx)
+            legInLow = l[t - legInIdx]
+            legInHigh = h[t - legInIdx]
+            legInOpen = o[t - legInIdx]
+            legInClose = c[t - legInIdx]
 
             legInIsBull = is_bull(t, legInIdx)
             legInIsBear = is_bear(t, legInIdx)
 
-            legIn_clv_ok = True
-            if legInIsBear:
-                clv = _clv_bearish(legInOpen, legInHigh, legInLow, legInClose)
-                legIn_clv_ok = clv >= p["legInMinClvPct"]
-            elif legInIsBull:
+            if not (legInIsBull or legInIsBear):
+                continue
+
+            # CLV ≥ 60%
+            if legInIsBull:
                 clv = _clv_bullish(legInOpen, legInHigh, legInLow, legInClose)
-                legIn_clv_ok = clv >= p["legInMinClvPct"]
             else:
-                legIn_clv_ok = False
-            if not legIn_clv_ok:
-                validLegIn = False
+                clv = _clv_bearish(legInOpen, legInHigh, legInLow, legInClose)
+            clv_ok = clv >= p["legInMinClvPct"]
 
-            passesVolume = v[t - legOutIdx] > v[t - legInIdx]
-            avg_vol_lookback = rolling_avg_vol[t - legOutIdx]
-            passesVolClimax = True
-            if not np.isnan(avg_vol_lookback) and avg_vol_lookback > 0:
-                passesVolClimax = v[t - legOutIdx] >= (p["legOutVolMult"] * avg_vol_lookback)
+            # TR ≥ 0.8 × ATR
+            legIn_tr_atr_ok = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
 
-            isLegOutExplosive = legOutTR >= (p["legOutAtrMult"] * atr[t - legOutIdx])
-            isLegOutWickValid = wick_pct(t, legOutIdx) <= p["legOutMaxWickPct"]
+            # TR > Max Base TR (hierarchy)
+            legIn_hierarchy_ok = legInTR > maxBaseTR
+
+            # TR ≥ 2.0 × Max Base TR
+            legIn_mult_ok = legInTR >= (p["legInMinMultOfBase"] * maxBaseTR)
+
+            validLegIn = clv_ok and legIn_tr_atr_ok and legIn_hierarchy_ok and legIn_mult_ok
+            if not validLegIn:
+                continue
+
+            # ---------------- LEG OUT VALIDATION ----------------
+            legOutTR = tr(t, legOutIdx)
+            legOutHigh = h[t - legOutIdx]
+            legOutLow = l[t - legOutIdx]
+            legOutClose = c[t - legOutIdx]
+
             isDemandLegOut = is_bull(t, legOutIdx)
             isSupplyLegOut = is_bear(t, legOutIdx)
+            if not (isDemandLegOut or isSupplyLegOut):
+                continue
+
+            # Explosive: TR ≥ 1.2 × ATR
+            isLegOutExplosive = legOutTR >= (p["legOutAtrMult"] * atr[t - legOutIdx])
+
+            # HQ Threshold: TR ≥ 2.0 × ATR
+            isHQCandidate = legOutTR >= (p["hqLegOutAtr"] * atr[t - legOutIdx])
+
+            # Wick % ≤ 25%
+            isLegOutWickValid = wick_pct(t, legOutIdx) <= p["legOutMaxWickPct"]
+
+            # TR Hierarchy: LegOut > LegIn > MaxBaseTR
             passesTRHierarchy = (legOutTR > legInTR) and (legInTR > maxBaseTR)
 
+            # BOS (Break of Structure)
+            hasBOS = False
+            if isDemandLegOut:
+                bos_strict = legOutClose > max(legInHigh, maxBaseHigh)
+                bos_loose = (legOutLow > maxBaseHigh) or (legOutClose > legInHigh)
+                hasBOS = bos_strict or bos_loose
+            elif isSupplyLegOut:
+                bos_strict = legOutClose < min(legInLow, minBaseLow)
+                bos_loose = (legOutHigh < minBaseLow) or (legOutClose < legInLow)
+                hasBOS = bos_strict or bos_loose
+
+            # Volume > Leg In Volume
+            passesVolume = v[t - legOutIdx] > v[t - legInIdx]
+
+            # ---------------- PATTERN CLASSIFICATION ----------------
             isRBR = legInIsBull and isDemandLegOut
             isDBR = legInIsBear and isDemandLegOut
             isDBD = legInIsBear and isSupplyLegOut
             isRBD = legInIsBull and isSupplyLegOut
 
-            hasBOS = False
-            if isDemandLegOut:
-                hasBOS = c[t - legOutIdx] > max(h[t - legInIdx], maxBaseHigh)
-            elif isSupplyLegOut:
-                hasBOS = c[t - legOutIdx] < min(l[t - legInIdx], minBaseLow)
-
-            hasImbalance = True
-            if p["useImbalance"]:
-                if isDemandLegOut:
-                    hasImbalance = (l[t - legOutIdx] > maxBaseHigh) or (c[t - legOutIdx] > h[t - legInIdx])
-                elif isSupplyLegOut:
-                    hasImbalance = (h[t - legOutIdx] < minBaseLow) or (c[t - legOutIdx] < l[t - legInIdx])
-
-            sweptLiquidity = False
-            sweepRejectionOk = True
-            if isDemandLegOut and not np.isnan(lastSwingLow[t]):
-                sweptLiquidity = (minBaseLow < lastSwingLow[t]) or (legInLow < lastSwingLow[t])
-                if sweptLiquidity and p["requireSweepRejectionClose"]:
-                    sweepRejectionOk = legInClose > lastSwingLow[t]
-            elif isSupplyLegOut and not np.isnan(lastSwingHigh[t]):
-                sweptLiquidity = (maxBaseHigh > lastSwingHigh[t]) or (legInHigh > lastSwingHigh[t])
-                if sweptLiquidity and p["requireSweepRejectionClose"]:
-                    sweepRejectionOk = legInClose < lastSwingHigh[t]
-
-            passesSweepCheck = True
-            if p["useSweepFilter"]:
-                passesSweepCheck = sweptLiquidity and sweepRejectionOk
-
             isValid = (
                 (isRBR or isDBR or isDBD or isRBD)
-                and allBaseValid and base_body_ratio_ok and base_overlap_ok and base_vol_ok
-                and validLegIn and isLegOutExplosive and isLegOutWickValid
-                and passesTRHierarchy and hasBOS and passesVolume and passesVolClimax
-                and hasImbalance and passesSweepCheck
+                and isLegOutExplosive
+                and isLegOutWickValid
+                and passesTRHierarchy
+                and hasBOS
+                and passesVolume
             )
 
-            if isValid:
-                zoneFoundOnThisBar = True
-                densityScore = 25
-                if legOutTR >= p["hqLegOutAtr"] * atr[t - legOutIdx]: densityScore += 25
-                if sweptLiquidity: densityScore += 25
-                if baseCount <= 2 and t - 1 >= 0 and not np.isnan(atr[t - 1]) and maxBaseTR <= 0.7 * atr[t - 1]:
-                    densityScore += 25
-                if base_is_contracting:
-                    densityScore = min(100, densityScore + 10)
-                isHQZone = densityScore >= 75
+            if not isValid:
+                continue
 
-                if legacy:
-                    proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
-                    distVal = minBaseLow if isDemandLegOut else maxBaseHigh
-                else:
-                    if isDemandLegOut:
-                        proxVal = baseBodyHighMax
-                        if isDBR:
-                            extra = max(0.0, minBaseLow - legInLow)
-                            distVal = minBaseLow - extra * legInInclusionFactor
-                        else:
-                            distVal = minBaseLow
+            zoneFoundOnThisBar = True
+
+            # ---------------- DENSITY SCORE ----------------
+            densityScore = 50
+            if isHQCandidate:
+                densityScore += 25
+            isHQZone = densityScore >= 75
+
+            # ---------------- PROXIMAL / DISTAL ----------------
+            if legacy:
+                proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
+                distVal = minBaseLow if isDemandLegOut else maxBaseHigh
+            else:
+                if isDemandLegOut:
+                    proxVal = baseBodyHighMax
+                    if isDBR:
+                        extra = max(0.0, minBaseLow - legInLow)
+                        distVal = minBaseLow - extra * legInInclusionFactor
                     else:
-                        proxVal = baseBodyLowMin
-                        if isRBD:
-                            extra = max(0.0, legInHigh - maxBaseHigh)
-                            distVal = maxBaseHigh + extra * legInInclusionFactor
-                        else:
-                            distVal = maxBaseHigh
+                        distVal = minBaseLow
+                else:
+                    proxVal = baseBodyLowMin
+                    if isRBD:
+                        extra = max(0.0, legInHigh - maxBaseHigh)
+                        distVal = maxBaseHigh + extra * legInInclusionFactor
+                    else:
+                        distVal = maxBaseHigh
 
-                slVal = (distVal - p["slBufferAtr"] * atr[t]) if isDemandLegOut else (distVal + p["slBufferAtr"] * atr[t])
-                riskPerShare = abs(proxVal - slVal)
-                risk_in_atr = riskPerShare / atr[t] if atr[t] > 0 else 0.0
-                if risk_in_atr < p["riskAtrMin"] or risk_in_atr > p["riskAtrMax"]:
-                    continue
+            slVal = (distVal - p["slBufferAtr"] * atr[t]) if isDemandLegOut else (distVal + p["slBufferAtr"] * atr[t])
+            riskPerShare = abs(proxVal - slVal)
+            tpVal = (proxVal + riskPerShare * p["targetRR"]) if isDemandLegOut else (proxVal - riskPerShare * p["targetRR"])
 
-                tpVal = (proxVal + riskPerShare * p["targetRR"]) if isDemandLegOut else (proxVal - riskPerShare * p["targetRR"])
+            # ---------------- DUPLICATE CHECK ----------------
+            isDuplicate = False
+            for i in range(0, min(len(zones), 11)):
+                checkZ = zones[len(zones) - 1 - i]
+                if checkZ.isDemand == isDemandLegOut and abs(checkZ.proxVal - proxVal) < (atr[t] * 0.25):
+                    isDuplicate = True
+                    break
 
-                isDuplicate = False
-                for i in range(0, min(len(zones), 11)):
-                    checkZ = zones[len(zones) - 1 - i]
-                    if checkZ.isDemand == isDemandLegOut and abs(checkZ.proxVal - proxVal) < (atr[t] * 0.25):
-                        isDuplicate = True
-                        break
+            if isDuplicate:
+                continue
 
-                if not isDuplicate:
-                    if isRBR: patternType, zoneCategory = "RBR", "Continuation"
-                    elif isDBR: patternType, zoneCategory = "DBR", "Reversal"
-                    elif isDBD: patternType, zoneCategory = "DBD", "Continuation"
-                    else: patternType, zoneCategory = "RBD", "Reversal"
+            if isRBR:
+                patternType, zoneCategory = "RBR", "Continuation"
+            elif isDBR:
+                patternType, zoneCategory = "DBR", "Reversal"
+            elif isDBD:
+                patternType, zoneCategory = "DBD", "Continuation"
+            else:
+                patternType, zoneCategory = "RBD", "Reversal"
 
-                    leftBar = t - baseCount
-                    newZone = Zone(
-                        proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
-                        isDemand=isDemandLegOut, isHQ=isHQZone, densityScore=densityScore,
-                        patternType=patternType, zoneCategory=zoneCategory, state="Fresh",
-                        touchCount=0, originalDensityScore=densityScore,
-                        startBarIndex=leftBar, createdBarIndex=t, baseCount=baseCount,
-                        timestamp=df.index[t],
-                    )
-                    zones.append(newZone)
-                    active_zones.append(newZone)
+            leftBar = t - baseCount
+            newZone = Zone(
+                proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
+                isDemand=isDemandLegOut, isHQ=isHQZone, densityScore=densityScore,
+                patternType=patternType, zoneCategory=zoneCategory, state="Fresh",
+                touchCount=0, originalDensityScore=densityScore,
+                startBarIndex=leftBar, createdBarIndex=t, baseCount=baseCount,
+                timestamp=df.index[t],
+            )
+            zones.append(newZone)
+            active_zones.append(newZone)
 
+        # ---------------- ZONE STATE TRACKING ----------------
         if active_zones:
             lo_t, hi_t = l[t], h[t]
             still_active = []
             for z in active_zones:
-                if z.state == "Fresh" and not np.isnan(atr[t]) and atr[t] > 0:
-                    ref_price = c[t]
-                    dist_atr = abs(ref_price - z.proxVal) / atr[t]
-                    if dist_atr > p["curveExtensionAtrMax"]:
-                        z.densityScore = max(10, z.densityScore - p["curveExtensionPenalty"])
-                        z.isHQ = z.densityScore >= 75
-
                 if z.state == "Fresh":
                     if z.isDemand:
                         if lo_t <= z.proxVal and lo_t > z.distVal:
-                            z.state = "Tested"; z.touchCount += 1
+                            z.state = "Tested"
+                            z.touchCount += 1
                         elif lo_t <= z.distVal:
                             z.state = "Broken"
                     else:
                         if hi_t >= z.proxVal and hi_t < z.distVal:
-                            z.state = "Tested"; z.touchCount += 1
+                            z.state = "Tested"
+                            z.touchCount += 1
                         elif hi_t >= z.distVal:
                             z.state = "Broken"
                 elif z.state == "Tested":
-                    still_touching = (
-                        (z.isDemand and lo_t <= z.proxVal) or
-                        ((not z.isDemand) and hi_t >= z.proxVal)
-                    )
-                    if (z.isDemand and lo_t <= z.distVal) or ((not z.isDemand) and hi_t >= z.distVal):
-                        z.state = "Broken"
-                    elif still_touching:
-                        z.touchCount += 1
-                        z.densityScore = max(10, z.densityScore - p["touchDecayPerTest"])
-                        z.isHQ = z.densityScore >= 75
+                    if z.isDemand:
+                        if lo_t <= z.distVal:
+                            z.state = "Broken"
+                        elif lo_t <= z.proxVal:
+                            z.touchCount += 1
+                    else:
+                        if hi_t >= z.distVal:
+                            z.state = "Broken"
+                        elif hi_t >= z.proxVal:
+                            z.touchCount += 1
 
                 if z.state != "Broken":
                     still_active.append(z)
-                elif p["enableRoleReversal"] and not z.flipped:
-                    z.flipped = True
-                    flip = Zone(
-                        proxVal=z.distVal, distVal=z.proxVal,
-                        slVal=z.proxVal + (z.proxVal - z.distVal) * 0.1 * (1 if z.isDemand else -1),
-                        tpVal=z.distVal, isDemand=not z.isDemand, isHQ=False, densityScore=30,
-                        patternType="FLIP", zoneCategory="Flip", state="Fresh",
-                        startBarIndex=z.startBarIndex, createdBarIndex=t, baseCount=z.baseCount,
-                        timestamp=df.index[t],
-                    )
-                    zones.append(flip)
-                    still_active.append(flip)
             active_zones = still_active
 
     return zones
