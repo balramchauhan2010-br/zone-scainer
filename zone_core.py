@@ -1,42 +1,51 @@
 # -*- coding: utf-8 -*-
 """
-zone_core.py — v3 (STRICT RULE-BASED: LEG-IN / BASE / LEG-OUT)
+zone_core.py — v4 (STRICT RULE-BASED: LEG-IN / BASE / LEG-OUT)
 ==========================================================================
 DBR (Demand/Reversal) | RBR (Demand/Continuation) |
 RBD (Supply/Reversal) | DBD (Supply/Continuation)
 
 हर zone: patternType ("DBR"/"RBR"/"RBD"/"DBD"), zoneCategory ("Reversal"/"Continuation")
 
+WHAT CHANGED vs v3
+-------------------
+  - Leg-Out max wick %:      25%  ->  30%   (legOutMaxWickPct)
+  - Leg-In min mult of base: 2.0x ->  1.50x (legInMinMultOfBase)
+  - Removed the redundant `legIn_hierarchy_ok` (TR > MaxBaseTR) check -
+    it was always implied by legIn_mult_ok (>=1.5x already means >1x),
+    so it never changed results; dropping it is a no-op cleanup, not a
+    rule change.
+
 ------------------------------------------------------------------
 LEG IN VALIDATION
 ------------------------------------------------------------------
-  ✅ Direction: Pattern के अनुसार Bullish/Bearish
-  ✅ CLV (Close Location Value) ≥ 60%
-       🟢 Bullish: (Close - Low) / (High - Low) ≥ 0.60
-       🔴 Bearish: (High - Close) / (High - Low) ≥ 0.60
-  ✅ True Range ≥ 0.8 × ATR
-  ✅ TR > Max Base TR (Hierarchy)
-  ✅ TR ≥ 2.0 × Max Base TR (legInMinMultOfBase)
+  Direction: Pattern के अनुसार Bullish/Bearish
+  CLV (Close Location Value) >= 60%
+       Bullish: (Close - Low) / (High - Low) >= 0.60
+       Bearish: (High - Close) / (High - Low) >= 0.60
+  True Range >= 0.8 x ATR
+  TR >= 1.50 x Max Base TR (legInMinMultOfBase) - this alone also
+     guarantees TR > Max Base TR, so no separate hierarchy check needed
 
 ------------------------------------------------------------------
 BASE VALIDATION (1-3 Candles)
 ------------------------------------------------------------------
-  ✅ Count: minBaseCount=1 से maxBaseCount=3
-  ✅ हर Candle: TR ≤ 1.0 × ATR (maxBaseAtrMult)
+  Count: minBaseCount=1 to maxBaseCount=3
+  Each Candle: TR <= 1.0 x ATR (maxBaseAtrMult)
 
 ------------------------------------------------------------------
 LEG OUT VALIDATION
 ------------------------------------------------------------------
-  ✅ Explosive: TR ≥ 1.2 × ATR (legOutAtrMult)
-  ✅ HQ Threshold: TR ≥ 2.0 × ATR → +25 Density Score
-  ✅ Wick % ≤ 25% (legOutMaxWickPct) — Strong Close
-  ✅ TR Hierarchy: LegOut > LegIn > MaxBaseTR
-  ✅ BOS (Break of Structure):
-       🟢 Demand: Close > Max(LegInHigh, MaxBaseHigh)
-       🔴 Supply: Close < Min(LegInLow, MinBaseLow)
-       🟢 Demand: Low > MaxBaseHigh OR Close > LegInHigh
-       🔴 Supply: High < MinBaseLow OR Close < LegInLow
-  ✅ Volume > Leg In Volume
+  Explosive: TR >= 1.2 x ATR (legOutAtrMult)
+  HQ Threshold: TR >= 2.0 x ATR -> +25 Density Score
+  Wick % <= 30% (legOutMaxWickPct) - Strong Close
+  TR Hierarchy: LegOut > LegIn > MaxBaseTR
+  BOS (Break of Structure):
+       Demand: Close > Max(LegInHigh, MaxBaseHigh)
+       Supply: Close < Min(LegInLow, MinBaseLow)
+       Demand: Low > MaxBaseHigh OR Close > LegInHigh
+       Supply: High < MinBaseLow OR Close < LegInLow
+  Volume > Leg In Volume
 
 Public entry points:
     scan_zones(df, params=None)              -> List[Zone]
@@ -59,17 +68,17 @@ DEFAULT_PARAMS = dict(
     # --- Base rules ---
     minBaseCount=1,
     maxBaseCount=3,
-    maxBaseAtrMult=1.0,        # हर base candle: TR ≤ 1.0 × ATR
+    maxBaseAtrMult=1.0,        # each base candle: TR <= 1.0 x ATR
 
     # --- Leg-In rules ---
-    legInMinAtrMult=0.8,       # TR ≥ 0.8 × ATR
-    legInMinMultOfBase=2.0,    # TR ≥ 2.0 × MaxBaseTR
-    legInMinClvPct=0.60,       # CLV ≥ 60%
+    legInMinAtrMult=0.8,       # TR >= 0.8 x ATR
+    legInMinMultOfBase=1.50,   # TR >= 1.50 x MaxBaseTR  (was 2.0)
+    legInMinClvPct=0.60,       # CLV >= 60%
 
     # --- Leg-Out rules ---
-    legOutAtrMult=1.2,         # Explosive: TR ≥ 1.2 × ATR
-    hqLegOutAtr=2.0,           # HQ Threshold: TR ≥ 2.0 × ATR
-    legOutMaxWickPct=0.25,     # Wick % ≤ 25%
+    legOutAtrMult=1.2,         # Explosive: TR >= 1.2 x ATR
+    hqLegOutAtr=2.0,           # HQ Threshold: TR >= 2.0 x ATR
+    legOutMaxWickPct=0.30,     # Wick % <= 30%  (was 0.25)
 
     # --- Proximal/Distal & risk ---
     legInInclusionFactor=0.35,
@@ -244,23 +253,21 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None) -> List[Zone]:
             if not (legInIsBull or legInIsBear):
                 continue
 
-            # CLV ≥ 60%
+            # CLV >= 60%
             if legInIsBull:
                 clv = _clv_bullish(legInOpen, legInHigh, legInLow, legInClose)
             else:
                 clv = _clv_bearish(legInOpen, legInHigh, legInLow, legInClose)
             clv_ok = clv >= p["legInMinClvPct"]
 
-            # TR ≥ 0.8 × ATR
+            # TR >= 0.8 x ATR
             legIn_tr_atr_ok = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
 
-            # TR > Max Base TR (hierarchy)
-            legIn_hierarchy_ok = legInTR > maxBaseTR
-
-            # TR ≥ 2.0 × Max Base TR
+            # TR >= 1.50 x Max Base TR (this alone implies TR > MaxBaseTR too,
+            # so the old separate ">" hierarchy check is redundant and removed)
             legIn_mult_ok = legInTR >= (p["legInMinMultOfBase"] * maxBaseTR)
 
-            validLegIn = clv_ok and legIn_tr_atr_ok and legIn_hierarchy_ok and legIn_mult_ok
+            validLegIn = clv_ok and legIn_tr_atr_ok and legIn_mult_ok
             if not validLegIn:
                 continue
 
@@ -275,13 +282,13 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None) -> List[Zone]:
             if not (isDemandLegOut or isSupplyLegOut):
                 continue
 
-            # Explosive: TR ≥ 1.2 × ATR
+            # Explosive: TR >= 1.2 x ATR
             isLegOutExplosive = legOutTR >= (p["legOutAtrMult"] * atr[t - legOutIdx])
 
-            # HQ Threshold: TR ≥ 2.0 × ATR
+            # HQ Threshold: TR >= 2.0 x ATR
             isHQCandidate = legOutTR >= (p["hqLegOutAtr"] * atr[t - legOutIdx])
 
-            # Wick % ≤ 25%
+            # Wick % <= 30%
             isLegOutWickValid = wick_pct(t, legOutIdx) <= p["legOutMaxWickPct"]
 
             # TR Hierarchy: LegOut > LegIn > MaxBaseTR
