@@ -1,91 +1,65 @@
 # -*- coding: utf-8 -*-
 """
-zone_core.py — v5 (STRICT RULE-BASED: LEG-IN / BASE / LEG-OUT) — UPDATED
+zone_core.py — v6 (PARITY WITH "Institutional D&S Engine Pro Max V6" Pine Script)
 ==========================================================================
-DBR (Demand/Reversal) | RBR (Demand/Continuation) |
-RBD (Supply/Reversal) | DBD (Supply/Continuation)
+Yeh version Pine Script v6 (SMC & Liquidity Sweep Edition) ke EXACT rules
+follow karta hai, taaki jo zones TradingView par dikh rahe hain wahi Python
+scanner me bhi milein.
 
-हर zone: patternType ("DBR"/"RBR"/"RBD"/"DBD"), zoneCategory ("Reversal"/"Continuation")
+PINE SCRIPT SE MAIN FARAK (jo pehle Python version me extra-strict tha,
+ab hataya/match kiya gaya hai)
+--------------------------------------------------------------------------
+  - Leg-In CLV >= 60% check    -> Pine me yeh bilkul NAHI hai -> HATAYA
+  - Leg-In wick% <= 25% check  -> Pine me yeh bilkul NAHI hai -> HATAYA
+  - Leg-In TR >= 1.0x ATR      -> Pine: TR >= 0.8x ATR          -> 0.8 kiya
+  - Leg-In TR > 2x Base TR     -> Pine me sirf hierarchy         -> hataya
+                                   (sirf legInTR > maxBaseTR chahiye, jo
+                                   passesTRHierarchy ke andar hi hota hai)
+  - Base TR < ATR (strict)     -> Pine: TR > ATR par hi invalid  -> `<=` OK
+                                   wapas kiya (non-strict)
+  - Proximal/Distal            -> Pine: sirf maxBaseHigh/minBaseLow
+                                   (fancy DBR/RBD extra-inclusion hataya)
+  - Volume filter              -> Pine: legOutVol > legInVol ALWAYS required
+                                   (pehle Python me optional/info-only tha)
+                                   -> wapas MANDATORY kiya
 
-WHAT CHANGED vs v4 (as requested)
-----------------------------------
-Nayi (relaxed) rule table:
-
-    Leg-In                         Leg-Out
-    ------------------------------  ------------------------------
-    सही दिशा (bull/bear)            सही दिशा (bull/bear)
-    CLV >= 60%                      Wick <= 25%          (legOutMaxWickPct: 0.30 -> 0.25)
-    Wick <= 25% (NEW - mandatory)   TR >= 1.1 x ATR       (legOutAtrMult: 1.2 -> 1.1, legInMinAtrMult: 0.8 -> 1.0)
-    TR >= 1.0 x ATR                 TR > Leg-In TR
-    TR > Base TR (strict, no
-      more 1.5x multiplier)         BOS (structure तोड़े)
-
-  - legInMaxWickPct (0.25) नया जोड़ा गया: सिर्फ CLV>=60% काफी नहीं माना,
-    leg-in candle की wick% भी अलग से explicitly <=25% होनी अनिवार्य है
-    (CLV high होने पर भी opposite-side wick कभी-कभी 25% से ऊपर हो सकती है).
-
-  - legInMinMultOfBase: अब 2.0x (strict, TR > 2.0 x MaxBaseTR)।
-  - Volume > LegIn Volume की शर्त हटाई गई (नई लिस्ट में नहीं थी, अब यह
-    validity को block नहीं करती, बस info के लिए हर zone पर उपलब्ध है
-    चाहें तो अलग से filter कर सकते हैं)।
-  - hqLegOutAtr (2.0x ATR) सिर्फ़ density-score bonus के लिए है, validity
-    की शर्त नहीं है (पहले भी ऐसा ही था)।
-
-BUG FIX — "demand/supply zone छूटना" (missed zones in long trends)
---------------------------------------------------------------------
-  पुराने duplicate-check में यह नहीं देखा जाता था कि जिस पुराने zone से
-  नए zone की proximity compare हो रही है वो अभी भी ACTIVE है या पहले ही
-  "Broken" हो चुका है। नतीजा: लंबे (6-12+ महीने के) trend में, जब प्राइस
-  ऊपर से नीचे (या नीचे से ऊपर) आता है, तो ठीक निकट का नया valid zone अक्सर
-  किसी बहुत पुराने, पहले ही टूट चुके zone के price-level के करीब पड़ जाता
-  था और सिर्फ इसी वजह से "duplicate" मानकर discard हो जाता था — जबकि वो
-  पुराना zone अब relevant ही नहीं था।
-
-  FIX: अब duplicate-check सिर्फ उन zones से होता है जो अभी भी "Broken"
-  नहीं हुए (Fresh/Tested) हैं। इससे current price के पास बनने वाला नया,
-  सही zone अब skip नहीं होगा।
-
-NEW — lookback window support (recent-N-months scanning)
-------------------------------------------------------------------
-  scan_zones() को अब `lookback_months` पैरामीटर दिया जा सकता है।
-  - ATR / base / leg-in जैसी सभी calculations अभी भी पूरे उपलब्ध डेटा
-    (जितना भी warm-up चाहिए) पर होती हैं, ताकि शुरुआती bars गलत ना निकलें।
-  - लेकिन नए zones सिर्फ उन bars पर ढूंढे और record किए जाते हैं जो
-    latest candle से `lookback_months` महीनों के अंदर आते हैं।
-  - इससे "आज के latest close candle से पीछे 3-6 महीने तक स्कैन" वाला
-    behaviour मिलता है, बिना warm-up / history को छोटा किए (जो ATR को
-    गलत बना देता)।
-  - Default None का मतलब है: पूरे data पर scan (पुराना behaviour)।
+  NAYE (Pine se add kiye gaye) rules:
+  - reqLegInVol: volume[legIn] >= 0.8 x volume[legIn+1]  (exhaustion check)
+  - useImbalance: institutional imbalance/displacement filter
+        Demand: low[legOut] > maxBaseHigh  OR  close[legOut] > legInHigh
+        Supply: high[legOut] < minBaseLow  OR  close[legOut] < legInLow
+    (yeh "loose BOS" jaisa hai, ab BOS ke ALAWA/additionally chahiye)
+  - useSweepFilter: liquidity sweep of prior swing high/low
+        Pivot(left=5,right=5) se swing points detect hote hain, aur base
+        ya leg-in ne us swing ko todha hona chahiye.
+  - Position sizing (accountCapital, riskPct) se qty calculate hoti hai
+    (Pine ke risk-management panel ki tarah, optional/info field).
 
 ------------------------------------------------------------------
-LEG IN VALIDATION
+FULL VALIDATION (Pine parity)
 ------------------------------------------------------------------
-  Direction: Pattern के अनुसार Bullish/Bearish
-  CLV (Close Location Value) >= 60%
-       Bullish: (Close - Low) / (High - Low) >= 0.60
-       Bearish: (High - Close) / (High - Low) >= 0.60
-  Wick % <= 25% (legInMaxWickPct) - CLV ke saath-saath explicit wick cap bhi
-  True Range >= 1.0 x ATR
-  TR > 2.0 x Max Base TR (legInMinMultOfBase, strict >)
+  BASE (1-3 candles):        each candle TR <= 1.0 x ATR
 
-------------------------------------------------------------------
-BASE VALIDATION (1-3 Candles)
-------------------------------------------------------------------
-  Count: minBaseCount=1 to maxBaseCount=3
-  Each Candle: TR < 1.0 x ATR (maxBaseAtrMult, STRICT less-than)
+  LEG-IN:
+    - correct direction (bull/bear)
+    - if reqLegInVol: volume[legIn] >= 0.8 x volume[legIn+1]
+                       AND TR[legIn] >= 0.8 x ATR[legIn]
 
-------------------------------------------------------------------
-LEG OUT VALIDATION
-------------------------------------------------------------------
-  Explosive: TR >= 1.1 x ATR (legOutAtrMult)
-  HQ Threshold (score bonus only): TR >= 2.0 x ATR -> +25 Density Score
-  Wick % <= 25% (legOutMaxWickPct) - Strong Close
-  TR Hierarchy: LegOut > LegIn > MaxBaseTR
-  BOS (Break of Structure):
-       Demand: Close > Max(LegInHigh, MaxBaseHigh)
-       Supply: Close < Min(LegInLow, MinBaseLow)
-       Demand: Low > MaxBaseHigh OR Close > LegInHigh
-       Supply: High < MinBaseLow OR Close < LegInLow
+  LEG-OUT:
+    - correct direction
+    - Explosive: TR >= 1.2 x ATR
+    - Wick % <= 25%
+    - TR Hierarchy: LegOut TR > LegIn TR > MaxBaseTR
+    - BOS (strict, close-based):
+         Demand: Close > Max(LegInHigh, MaxBaseHigh)
+         Supply: Close < Min(LegInLow, MinBaseLow)
+    - Imbalance (if useImbalance):
+         Demand: Low > MaxBaseHigh  OR  Close > LegInHigh
+         Supply: High < MinBaseLow  OR  Close < LegInLow
+    - Liquidity Sweep (if useSweepFilter):
+         Demand: MinBaseLow < lastSwingLow  OR  LegInLow < lastSwingLow
+         Supply: MaxBaseHigh > lastSwingHigh  OR  LegInHigh > lastSwingHigh
+    - Volume: Volume[legOut] > Volume[legIn]
 
 Public entry points:
     scan_zones(df, params=None, lookback_months=None) -> List[Zone]
@@ -100,33 +74,34 @@ import pandas as pd
 
 
 DEFAULT_PARAMS = dict(
-    # --- General ---
+    # --- Capital / position sizing (Pine group 1) ---
+    accountCapital=25000.0,
+    riskPct=0.5,
     targetRR=5.0,
     slBufferAtr=0.1,
-    atrPeriod=14,
 
-    # --- Base rules ---
+    # --- Algo & sweep filters (Pine group 2) ---
+    atrPeriod=14,
+    legOutAtrMult=1.2,        # Explosive: TR >= 1.2 x ATR
+    hqLegOutAtr=2.0,          # HQ displacement threshold (score bonus)
+    maxBaseAtrMult=1.0,       # Base candle max range (x ATR), non-strict <=
+    maxWickPct=0.25,          # Max wick% of leg-out (25%)
+    useSweepFilter=True,      # Require liquidity sweep
+    useImbalance=True,        # Require institutional imbalance/displacement
+
+    # --- Base & leg-in rules (Pine group 3) ---
     minBaseCount=1,
     maxBaseCount=3,
-    maxBaseAtrMult=1.0,        # each base candle: TR <= 1.0 x ATR
+    reqLegInVol=True,         # Strict leg-in volume/exhaustion filter
+    legInVolMinMult=0.8,      # volume[legIn] >= 0.8 x volume[legIn+1]
+    legInMinAtrMult=0.8,      # TR[legIn] >= 0.8 x ATR
 
-    # --- Leg-In rules ---
-    legInMinAtrMult=1.0,       # TR >= 1.0 x ATR              (was 0.8)
-    legInMinClvPct=0.60,       # CLV >= 60%
-    legInMaxWickPct=0.25,      # NEW: leg-in wick% <= 25% (mandatory, saath CLV>=60% ke)
-    legInMinMultOfBase=2.0,    # NEW (restored): leg-in TR > 2.0 x MaxBaseTR (strict >)
-
-    # --- Leg-Out rules ---
-    legOutAtrMult=1.1,         # Explosive: TR >= 1.1 x ATR   (was 1.2)
-    hqLegOutAtr=2.0,           # HQ Threshold (score bonus only, not a gate)
-    legOutMaxWickPct=0.25,     # Wick % <= 25%                (was 0.30)
-
-    # --- Proximal/Distal & risk ---
-    legInInclusionFactor=0.35,
-    legacyProximalDistal=False,
+    # --- Swing / liquidity sweep detection ---
+    swingLeftBars=5,
+    swingRightBars=5,
 )
 
-_HARD_MAX_BASE_COUNT = 3
+_HARD_MAX_BASE_COUNT = 4
 
 
 @dataclass
@@ -147,9 +122,8 @@ class Zone:
     createdBarIndex: int = 0
     baseCount: int = 0
     timestamp: object = None
-    volLegIn: float = 0.0
-    volLegOut: float = 0.0
-    volConfirmed: bool = False   # informational only, NOT a validity gate anymore
+    qty: int = 0
+    sweptLiquidity: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -178,36 +152,42 @@ def _wilder_atr(high, low, close, period):
     return atr
 
 
-def _clv_bullish(o, h, l, c):
-    rng = h - l
-    return 0.0 if rng <= 0 else (c - l) / rng
+def _last_known_swing(values: np.ndarray, is_high: bool, left: int, right: int) -> np.ndarray:
+    """
+    Pine ta.pivothigh/pivotlow(left,right) ki tarah swing points nikalta hai,
+    aur unhe sirf `right` bars baad "known/confirmed" maanta hai (causal),
+    phir forward-fill karke har bar t ka "lastSwingHigh/Low" return karta hai
+    (bilkul jaise Pine ke `var float lastSwingHigh` accumulate karta hai).
+    """
+    n = len(values)
+    revealed = np.full(n, np.nan)
+    for j in range(left, n - right):
+        window = values[j - left: j + right + 1]
+        center = values[j]
+        if is_high:
+            if center == window.max() and np.argmax(window) == left:
+                reveal_at = j + right
+                if reveal_at < n:
+                    revealed[reveal_at] = center
+        else:
+            if center == window.min() and np.argmin(window) == left:
+                reveal_at = j + right
+                if reveal_at < n:
+                    revealed[reveal_at] = center
 
-
-def _clv_bearish(o, h, l, c):
-    rng = h - l
-    return 0.0 if rng <= 0 else (h - c) / rng
+    out = pd.Series(revealed).ffill().to_numpy()
+    return out
 
 
 def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[float]) -> int:
-    """
-    Latest candle se peeche `lookback_months` mahino tak ka starting bar-index
-    nikalta hai. Agar index DatetimeIndex hai to calendar months use hote hain,
-    warna approx 21 trading-days/month * lookback_months bars use hote hain.
-    ATR/base warm-up ke liye poora data phir bhi upar (scan_zones me) use hota
-    hai — yeh function sirf ye tay karta hai ki NEW zones kis bar se record
-    karne shuru karein.
-    """
     n = len(df)
     if lookback_months is None or lookback_months <= 0 or n == 0:
         return 0
-
     idx = df.index
     if isinstance(idx, pd.DatetimeIndex):
         cutoff = idx[-1] - pd.DateOffset(months=lookback_months)
         pos = idx.searchsorted(cutoff, side="left")
         return int(max(0, pos))
-
-    # Fallback: non-datetime index -> approximate bar count
     approx_bars = int(round(lookback_months * 21))
     return int(max(0, n - approx_bars))
 
@@ -217,13 +197,6 @@ def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[
 # --------------------------------------------------------------------------
 def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 lookback_months: Optional[float] = None) -> List[Zone]:
-    """
-    df: OHLCV dataframe (poora available history dena best hai, warm-up ke
-        liye) — chronological order (oldest -> newest), jaisa pehle tha.
-    lookback_months: agar diya gaya to sirf latest candle se peeche itne
-        mahino ke andar bane zones hi return honge (ATR/base calculation
-        poori history par hi hoti hai, isliye accuracy nahi ghatti).
-    """
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
@@ -241,10 +214,11 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
     minBaseCount = p["minBaseCount"]
     maxBaseCount = p["maxBaseCount"]
     atrPeriod = p["atrPeriod"]
-    legacy = p["legacyProximalDistal"]
-    legInInclusionFactor = p["legInInclusionFactor"]
 
     atr = _wilder_atr(h, l, c, atrPeriod)
+
+    lastSwingHigh = _last_known_swing(h, True, p["swingLeftBars"], p["swingRightBars"])
+    lastSwingLow = _last_known_swing(l, False, p["swingLeftBars"], p["swingRightBars"])
 
     def tr(t, idx):
         return h[t - idx] - l[t - idx]
@@ -265,10 +239,8 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
     zones: List[Zone] = []
     active_zones: List[Zone] = []
-    min_start = max(atrPeriod, maxBaseCount + 2, 11)
+    min_start = max(atrPeriod, maxBaseCount + 2, p["swingLeftBars"] + p["swingRightBars"] + 1, 11)
 
-    # Sirf recording (result me shamil karna) is bar se shuru hogi;
-    # calculation (ATR/base/leg-in warm-up) hamesha poori history use karti hai.
     record_from_bar = max(min_start, _resolve_start_bar_for_lookback(df, lookback_months))
 
     for t in range(min_start, n):
@@ -276,7 +248,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             continue
 
         zoneFoundOnThisBar = False
-        should_record_here = t >= record_from_bar
 
         for baseCount in range(minBaseCount, maxBaseCount + 1):
             if zoneFoundOnThisBar:
@@ -284,9 +255,10 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             legOutIdx = 0
             legInIdx = baseCount + 1
-            if t - legInIdx < 0 or t - baseCount < 0:
+            # reqLegInVol ke liye ek bar aur peeche (legInIdx+1) chahiye
+            if t - (legInIdx + 1) < 0 or t - baseCount < 0:
                 continue
-            if np.isnan(atr[t - legInIdx]):
+            if np.isnan(atr[t - legInIdx]) or np.isnan(atr[t]):
                 continue
 
             # ---------------- BASE VALIDATION ----------------
@@ -294,72 +266,46 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             maxBaseTR = 0.0
             maxBaseHigh = -1.0
             minBaseLow = float("inf")
-            baseBodyHighMax = -1.0
-            baseBodyLowMin = float("inf")
-            base_ok = True
 
             for b in range(1, baseCount + 1):
                 if np.isnan(atr[t - b]):
-                    base_ok = False
+                    allBaseValid = False
                     break
                 bTR = tr(t, b)
-                # STRICT: base TR < ATR (pehle <= tha, ab strict < chahiye)
-                if bTR >= (p["maxBaseAtrMult"] * atr[t - b]):
-                    allBaseValid = False
                 if bTR > maxBaseTR:
                     maxBaseTR = bTR
+                # Pine: `if bTR > (maxBaseAtrMult * atrVal[b])` -> invalid.
+                # yani bTR <= maxBaseAtrMult*ATR chalta hai (non-strict).
+                if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
+                    allBaseValid = False
                 if h[t - b] > maxBaseHigh:
                     maxBaseHigh = h[t - b]
                 if l[t - b] < minBaseLow:
                     minBaseLow = l[t - b]
-                bodyHigh = max(o[t - b], c[t - b])
-                bodyLow = min(o[t - b], c[t - b])
-                if bodyHigh > baseBodyHighMax:
-                    baseBodyHighMax = bodyHigh
-                if bodyLow < baseBodyLowMin:
-                    baseBodyLowMin = bodyLow
 
-            if not base_ok or not allBaseValid or maxBaseTR <= 0:
+            if not allBaseValid:
                 continue
 
-            # ---------------- LEG IN VALIDATION ----------------
+            # ---------------- LEG-IN VALIDATION (Pine parity) ----------------
             legInTR = tr(t, legInIdx)
             legInLow = l[t - legInIdx]
             legInHigh = h[t - legInIdx]
-            legInOpen = o[t - legInIdx]
-            legInClose = c[t - legInIdx]
             legInVol = v[t - legInIdx]
 
             legInIsBull = is_bull(t, legInIdx)
             legInIsBear = is_bear(t, legInIdx)
-
             if not (legInIsBull or legInIsBear):
                 continue
 
-            # CLV >= 60%
-            if legInIsBull:
-                clv = _clv_bullish(legInOpen, legInHigh, legInLow, legInClose)
-            else:
-                clv = _clv_bearish(legInOpen, legInHigh, legInLow, legInClose)
-            clv_ok = clv >= p["legInMinClvPct"]
-
-            # TR >= 1.0 x ATR  (relaxed rule)
-            legIn_tr_atr_ok = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
-
-            # TR > 2.0 x Max Base TR  (restored multiplier, strict >)
-            legIn_mult_ok = legInTR > (p["legInMinMultOfBase"] * maxBaseTR)
-
-            # NEW: Leg-In wick% <= 25% (mandatory, CLV>=60% ke saath-saath)
-            # CLV aur wick% related to zaroor hain, lekin dono ko explicitly
-            # check karna zyada strict/safe hai - kabhi kabhi high CLV ke
-            # baawajood opposite side ki wick 25% se zyada ho sakti hai.
-            legIn_wick_ok = wick_pct(t, legInIdx) <= p["legInMaxWickPct"]
-
-            validLegIn = clv_ok and legIn_tr_atr_ok and legIn_mult_ok and legIn_wick_ok
+            validLegIn = True
+            if p["reqLegInVol"]:
+                prevVol = v[t - (legInIdx + 1)]
+                validLegIn = (legInVol >= p["legInVolMinMult"] * prevVol) and \
+                             (legInTR >= p["legInMinAtrMult"] * atr[t - legInIdx])
             if not validLegIn:
                 continue
 
-            # ---------------- LEG OUT VALIDATION ----------------
+            # ---------------- LEG-OUT VALIDATION ----------------
             legOutTR = tr(t, legOutIdx)
             legOutHigh = h[t - legOutIdx]
             legOutLow = l[t - legOutIdx]
@@ -371,31 +317,35 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if not (isDemandLegOut or isSupplyLegOut):
                 continue
 
-            # Explosive: TR >= 1.1 x ATR (relaxed rule)
             isLegOutExplosive = legOutTR >= (p["legOutAtrMult"] * atr[t - legOutIdx])
-
-            # HQ Threshold (score bonus only): TR >= 2.0 x ATR
-            isHQCandidate = legOutTR >= (p["hqLegOutAtr"] * atr[t - legOutIdx])
-
-            # Wick % <= 25% (relaxed rule)
-            isLegOutWickValid = wick_pct(t, legOutIdx) <= p["legOutMaxWickPct"]
-
-            # TR Hierarchy: LegOut > LegIn > MaxBaseTR
+            isLegOutWickValid = wick_pct(t, legOutIdx) <= p["maxWickPct"]
             passesTRHierarchy = (legOutTR > legInTR) and (legInTR > maxBaseTR)
+            passesVolume = legOutVol > legInVol
 
-            # BOS (Break of Structure)
+            # BOS (strict, close-based only — Pine parity)
             hasBOS = False
             if isDemandLegOut:
-                bos_strict = legOutClose > max(legInHigh, maxBaseHigh)
-                bos_loose = (legOutLow > maxBaseHigh) or (legOutClose > legInHigh)
-                hasBOS = bos_strict or bos_loose
+                hasBOS = legOutClose > max(legInHigh, maxBaseHigh)
             elif isSupplyLegOut:
-                bos_strict = legOutClose < min(legInLow, minBaseLow)
-                bos_loose = (legOutHigh < minBaseLow) or (legOutClose < legInLow)
-                hasBOS = bos_strict or bos_loose
+                hasBOS = legOutClose < min(legInLow, minBaseLow)
 
-            # Volume: ab yeh sirf informational hai, validity ko block NAHI karta
-            volConfirmed = legOutVol > legInVol
+            # Institutional imbalance / displacement filter
+            hasImbalance = True
+            if p["useImbalance"]:
+                if isDemandLegOut:
+                    hasImbalance = (legOutLow > maxBaseHigh) or (legOutClose > legInHigh)
+                elif isSupplyLegOut:
+                    hasImbalance = (legOutHigh < minBaseLow) or (legOutClose < legInLow)
+
+            # Liquidity sweep filter
+            swingHighAtT = lastSwingHigh[t]
+            swingLowAtT = lastSwingLow[t]
+            sweptLiquidity = False
+            if isDemandLegOut and not np.isnan(swingLowAtT):
+                sweptLiquidity = (minBaseLow < swingLowAtT) or (legInLow < swingLowAtT)
+            elif isSupplyLegOut and not np.isnan(swingHighAtT):
+                sweptLiquidity = (maxBaseHigh > swingHighAtT) or (legInHigh > swingHighAtT)
+            passesSweepCheck = sweptLiquidity if p["useSweepFilter"] else True
 
             # ---------------- PATTERN CLASSIFICATION ----------------
             isRBR = legInIsBull and isDemandLegOut
@@ -409,6 +359,9 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 and isLegOutWickValid
                 and passesTRHierarchy
                 and hasBOS
+                and passesVolume
+                and hasImbalance
+                and passesSweepCheck
             )
 
             if not isValid:
@@ -416,42 +369,28 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             zoneFoundOnThisBar = True
 
-            # ---------------- DENSITY SCORE ----------------
-            densityScore = 50
-            if isHQCandidate:
+            # ---------------- DENSITY SCORE (Pine parity) ----------------
+            densityScore = 25
+            if legOutTR >= p["hqLegOutAtr"] * atr[t - legOutIdx]:
+                densityScore += 25
+            if sweptLiquidity:
+                densityScore += 25
+            if baseCount <= 2 and maxBaseTR <= 0.7 * atr[t - 1]:
                 densityScore += 25
             isHQZone = densityScore >= 75
 
-            # ---------------- PROXIMAL / DISTAL ----------------
-            if legacy:
-                proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
-                distVal = minBaseLow if isDemandLegOut else maxBaseHigh
-            else:
-                if isDemandLegOut:
-                    proxVal = baseBodyHighMax
-                    if isDBR:
-                        extra = max(0.0, minBaseLow - legInLow)
-                        distVal = minBaseLow - extra * legInInclusionFactor
-                    else:
-                        distVal = minBaseLow
-                else:
-                    proxVal = baseBodyLowMin
-                    if isRBD:
-                        extra = max(0.0, legInHigh - maxBaseHigh)
-                        distVal = maxBaseHigh + extra * legInInclusionFactor
-                    else:
-                        distVal = maxBaseHigh
+            # ---------------- PROXIMAL / DISTAL (Pine: simple base-based) ----------------
+            proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
+            distVal = minBaseLow if isDemandLegOut else maxBaseHigh
 
             slVal = (distVal - p["slBufferAtr"] * atr[t]) if isDemandLegOut else (distVal + p["slBufferAtr"] * atr[t])
             riskPerShare = abs(proxVal - slVal)
             tpVal = (proxVal + riskPerShare * p["targetRR"]) if isDemandLegOut else (proxVal - riskPerShare * p["targetRR"])
 
-            # ---------------- DUPLICATE CHECK (BUG FIXED) ----------------
-            # Pehle yahan sirf proximity check hoti thi, Broken zones ko bhi
-            # duplicate maan liya jaata tha -> naya valid zone galat tarike
-            # se discard ho jaata tha jab price lambe trend ke baad kisi
-            # purane (ab irrelevant) zone ke paas wapas aata tha.
-            # Fix: sirf abhi bhi ACTIVE (non-Broken) zones se compare karo.
+            riskAmount = p["accountCapital"] * (p["riskPct"] / 100.0)
+            qty = int(riskAmount // riskPerShare) if riskPerShare > 0 else 0
+
+            # ---------------- DUPLICATE CHECK (active-only, bug-fixed) ----------------
             isDuplicate = False
             checked = 0
             for checkZ in reversed(zones):
@@ -463,7 +402,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 checked += 1
                 if checked >= 11:
                     break
-
             if isDuplicate:
                 continue
 
@@ -483,8 +421,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 patternType=patternType, zoneCategory=zoneCategory, state="Fresh",
                 touchCount=0, originalDensityScore=densityScore,
                 startBarIndex=leftBar, createdBarIndex=t, baseCount=baseCount,
-                timestamp=df.index[t],
-                volLegIn=legInVol, volLegOut=legOutVol, volConfirmed=volConfirmed,
+                timestamp=df.index[t], qty=qty, sweptLiquidity=sweptLiquidity,
             )
             zones.append(newZone)
             active_zones.append(newZone)
@@ -525,10 +462,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
     if lookback_months is None:
         return zones
-
-    # lookback diya gaya tha -> sirf window ke andar bane zones return karo
-    # (state-tracking poori history par ho chuki hai, isliye Fresh/Tested/
-    # Broken status abhi bhi सही hai)
     return [z for z in zones if z.createdBarIndex >= record_from_bar]
 
 
@@ -555,8 +488,8 @@ def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_p
         alerts.append({
             "direction": direction, "pattern": z.patternType, "category": z.zoneCategory,
             "entry": z.proxVal, "sl": z.slVal, "tp": z.tpVal, "is_hq": z.isHQ,
-            "score": z.densityScore, "touch_count": z.touchCount,
-            "vol_confirmed": z.volConfirmed,
+            "score": z.densityScore, "touch_count": z.touchCount, "qty": z.qty,
+            "swept_liquidity": z.sweptLiquidity,
             "distance_pct": diff_pct * 100, "state": z.state, "timestamp": z.timestamp,
         })
     alerts.sort(key=lambda a: (-int(a["is_hq"]), a["distance_pct"]))
