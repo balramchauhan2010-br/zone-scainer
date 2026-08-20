@@ -15,12 +15,16 @@ Nayi (relaxed) rule table:
     ------------------------------  ------------------------------
     सही दिशा (bull/bear)            सही दिशा (bull/bear)
     CLV >= 60%                      Wick <= 25%          (legOutMaxWickPct: 0.30 -> 0.25)
-    TR >= 1.0 x ATR                 TR >= 1.1 x ATR       (legOutAtrMult: 1.2 -> 1.1, legInMinAtrMult: 0.8 -> 1.0)
-    TR > Base TR (strict, no        TR > Leg-In TR
-      more 1.5x multiplier)
-                                     BOS (structure तोड़े)
+    Wick <= 25% (NEW - mandatory)   TR >= 1.1 x ATR       (legOutAtrMult: 1.2 -> 1.1, legInMinAtrMult: 0.8 -> 1.0)
+    TR >= 1.0 x ATR                 TR > Leg-In TR
+    TR > Base TR (strict, no
+      more 1.5x multiplier)         BOS (structure तोड़े)
 
-  - legInMinMultOfBase (1.5x) हटाया -> अब सिर्फ़ strict "TR > MaxBaseTR" चाहिए।
+  - legInMaxWickPct (0.25) नया जोड़ा गया: सिर्फ CLV>=60% काफी नहीं माना,
+    leg-in candle की wick% भी अलग से explicitly <=25% होनी अनिवार्य है
+    (CLV high होने पर भी opposite-side wick कभी-कभी 25% से ऊपर हो सकती है).
+
+  - legInMinMultOfBase: अब 2.0x (strict, TR > 2.0 x MaxBaseTR)।
   - Volume > LegIn Volume की शर्त हटाई गई (नई लिस्ट में नहीं थी, अब यह
     validity को block नहीं करती, बस info के लिए हर zone पर उपलब्ध है
     चाहें तो अलग से filter कर सकते हैं)।
@@ -60,14 +64,15 @@ LEG IN VALIDATION
   CLV (Close Location Value) >= 60%
        Bullish: (Close - Low) / (High - Low) >= 0.60
        Bearish: (High - Close) / (High - Low) >= 0.60
+  Wick % <= 25% (legInMaxWickPct) - CLV ke saath-saath explicit wick cap bhi
   True Range >= 1.0 x ATR
-  TR > Max Base TR (strict hierarchy, कोई multiplier नहीं)
+  TR > 2.0 x Max Base TR (legInMinMultOfBase, strict >)
 
 ------------------------------------------------------------------
 BASE VALIDATION (1-3 Candles)
 ------------------------------------------------------------------
   Count: minBaseCount=1 to maxBaseCount=3
-  Each Candle: TR <= 1.0 x ATR (maxBaseAtrMult)
+  Each Candle: TR < 1.0 x ATR (maxBaseAtrMult, STRICT less-than)
 
 ------------------------------------------------------------------
 LEG OUT VALIDATION
@@ -108,8 +113,8 @@ DEFAULT_PARAMS = dict(
     # --- Leg-In rules ---
     legInMinAtrMult=1.0,       # TR >= 1.0 x ATR              (was 0.8)
     legInMinClvPct=0.60,       # CLV >= 60%
-    # legInMinMultOfBase हटाया - अब सिर्फ strict "TR > MaxBaseTR" चाहिए
-    # (नीचे कोड में hard-coded strict comparison के रूप में लागू है)
+    legInMaxWickPct=0.25,      # NEW: leg-in wick% <= 25% (mandatory, saath CLV>=60% ke)
+    legInMinMultOfBase=2.0,    # NEW (restored): leg-in TR > 2.0 x MaxBaseTR (strict >)
 
     # --- Leg-Out rules ---
     legOutAtrMult=1.1,         # Explosive: TR >= 1.1 x ATR   (was 1.2)
@@ -298,7 +303,8 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                     base_ok = False
                     break
                 bTR = tr(t, b)
-                if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
+                # STRICT: base TR < ATR (pehle <= tha, ab strict < chahiye)
+                if bTR >= (p["maxBaseAtrMult"] * atr[t - b]):
                     allBaseValid = False
                 if bTR > maxBaseTR:
                     maxBaseTR = bTR
@@ -340,10 +346,16 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             # TR >= 1.0 x ATR  (relaxed rule)
             legIn_tr_atr_ok = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
 
-            # TR > Max Base TR  (strict hierarchy, no more 1.5x multiplier)
-            legIn_mult_ok = legInTR > maxBaseTR
+            # TR > 2.0 x Max Base TR  (restored multiplier, strict >)
+            legIn_mult_ok = legInTR > (p["legInMinMultOfBase"] * maxBaseTR)
 
-            validLegIn = clv_ok and legIn_tr_atr_ok and legIn_mult_ok
+            # NEW: Leg-In wick% <= 25% (mandatory, CLV>=60% ke saath-saath)
+            # CLV aur wick% related to zaroor hain, lekin dono ko explicitly
+            # check karna zyada strict/safe hai - kabhi kabhi high CLV ke
+            # baawajood opposite side ki wick 25% se zyada ho sakti hai.
+            legIn_wick_ok = wick_pct(t, legInIdx) <= p["legInMaxWickPct"]
+
+            validLegIn = clv_ok and legIn_tr_atr_ok and legIn_mult_ok and legIn_wick_ok
             if not validLegIn:
                 continue
 
