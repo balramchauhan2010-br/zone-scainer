@@ -1,70 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-zone_core.py — v6 (PARITY WITH "Institutional D&S Engine Pro Max V6" Pine Script)
+zone_core.py — v7 (Advanced Demand & Supply Engine with Strict CLV & Base Rules)
 ==========================================================================
-Yeh version Pine Script v6 (SMC & Liquidity Sweep Edition) ke EXACT rules
-follow karta hai, taaki jo zones TradingView par dikh rahe hain wahi Python
-scanner me bhi milein.
-
-PINE SCRIPT SE MAIN FARAK (jo pehle Python version me extra-strict tha,
-ab hataya/match kiya gaya hai)
---------------------------------------------------------------------------
-  - Leg-In CLV >= 60% check    -> Pine me yeh bilkul NAHI hai -> HATAYA
-  - Leg-In wick% <= 25% check  -> Pine me yeh bilkul NAHI hai -> HATAYA
-  - Leg-In TR >= 1.0x ATR      -> Pine: TR >= 0.8x ATR          -> 0.8 kiya
-  - Leg-In TR > 2x Base TR     -> Pine me sirf hierarchy         -> hataya
-                                   (sirf legInTR > maxBaseTR chahiye, jo
-                                   passesTRHierarchy ke andar hi hota hai)
-  - Base TR < ATR (strict)     -> Pine: TR > ATR par hi invalid  -> `<=` OK
-                                   wapas kiya (non-strict)
-  - Proximal/Distal            -> Pine: sirf maxBaseHigh/minBaseLow
-                                   (fancy DBR/RBD extra-inclusion hataya)
-  - Volume filter              -> Pine: legOutVol > legInVol ALWAYS required
-                                   (pehle Python me optional/info-only tha)
-                                   -> wapas MANDATORY kiya
-
-  NAYE (Pine se add kiye gaye) rules:
-  - reqLegInVol: volume[legIn] >= 0.8 x volume[legIn+1]  (exhaustion check)
-  - useImbalance: institutional imbalance/displacement filter
-        Demand: low[legOut] > maxBaseHigh  OR  close[legOut] > legInHigh
-        Supply: high[legOut] < minBaseLow  OR  close[legOut] < legInLow
-    (yeh "loose BOS" jaisa hai, ab BOS ke ALAWA/additionally chahiye)
-  - useSweepFilter: liquidity sweep of prior swing high/low
-        Pivot(left=5,right=5) se swing points detect hote hain, aur base
-        ya leg-in ne us swing ko todha hona chahiye.
-  - Position sizing (accountCapital, riskPct) se qty calculate hoti hai
-    (Pine ke risk-management panel ki tarah, optional/info field).
-
-------------------------------------------------------------------
-FULL VALIDATION (Pine parity)
-------------------------------------------------------------------
-  BASE (1-3 candles):        each candle TR <= 1.0 x ATR
-
-  LEG-IN:
-    - correct direction (bull/bear)
-    - if reqLegInVol: volume[legIn] >= 0.8 x volume[legIn+1]
-                       AND TR[legIn] >= 0.8 x ATR[legIn]
-
-  LEG-OUT:
-    - correct direction
-    - Explosive: TR >= 1.2 x ATR
-    - Wick % <= 25%
-    - TR Hierarchy: LegOut TR > LegIn TR > MaxBaseTR
-    - BOS (strict, close-based):
-         Demand: Close > Max(LegInHigh, MaxBaseHigh)
-         Supply: Close < Min(LegInLow, MinBaseLow)
-    - Imbalance (if useImbalance):
-         Demand: Low > MaxBaseHigh  OR  Close > LegInHigh
-         Supply: High < MinBaseLow  OR  Close < LegInLow
-    - Liquidity Sweep (if useSweepFilter):
-         Demand: MinBaseLow < lastSwingLow  OR  LegInLow < lastSwingLow
-         Supply: MaxBaseHigh > lastSwingHigh  OR  LegInHigh > lastSwingHigh
-    - Volume: Volume[legOut] > Volume[legIn]
-
-Public entry points:
-    scan_zones(df, params=None, lookback_months=None) -> List[Zone]
-    latest_active_zones(zones, ...)                    -> List[Zone]
-    get_zone_alerts(zones, current_price, ..)          -> List[dict]
+Updated Rules implemented:
+  - Leg-In Pressure & CLV >= 60%:
+      * RBR & RBD: Buying pressure (Bullish Leg-In, CLV >= 60%)
+      * DBR & DBD: Selling pressure (Bearish Leg-In, Bearish CLV >= 60%)
+  - Base Candles:
+      * Max count <= 3
+      * Every base candle TR < Leg-In TR
+  - Leg-Out:
+      * Always explosive in correct direction (TR >= 1.2 x ATR)
+      * TR Hierarchy: LegOut TR > LegIn TR > MaxBaseTR
 """
 
 from dataclasses import dataclass
@@ -74,34 +21,35 @@ import pandas as pd
 
 
 DEFAULT_PARAMS = dict(
-    # --- Capital / position sizing (Pine group 1) ---
+    # --- Capital / position sizing ---
     accountCapital=25000.0,
     riskPct=0.5,
     targetRR=5.0,
     slBufferAtr=0.1,
 
-    # --- Algo & sweep filters (Pine group 2) ---
+    # --- Algo & filters ---
     atrPeriod=14,
     legOutAtrMult=1.2,        # Explosive: TR >= 1.2 x ATR
     hqLegOutAtr=2.0,          # HQ displacement threshold (score bonus)
-    maxBaseAtrMult=1.0,       # Base candle max range (x ATR), non-strict <=
+    maxBaseAtrMult=1.0,       # Base candle max range (x ATR)
     maxWickPct=0.25,          # Max wick% of leg-out (25%)
     useSweepFilter=True,      # Require liquidity sweep
     useImbalance=True,        # Require institutional imbalance/displacement
 
-    # --- Base & leg-in rules (Pine group 3) ---
+    # --- Base & leg-in rules ---
     minBaseCount=1,
-    maxBaseCount=3,
-    reqLegInVol=True,         # Strict leg-in volume/exhaustion filter
-    legInVolMinMult=0.8,      # volume[legIn] >= 0.8 x volume[legIn+1]
-    legInMinAtrMult=0.8,      # TR[legIn] >= 0.8 x ATR
+    maxBaseCount=3,           # Base candles cannot exceed 3
+    reqLegInVol=True,         
+    legInVolMinMult=0.8,      
+    legInMinAtrMult=0.8,      
+    minClvPct=0.60,           # 60% CLV requirement for Leg-In pressure
 
     # --- Swing / liquidity sweep detection ---
     swingLeftBars=5,
     swingRightBars=5,
 )
 
-_HARD_MAX_BASE_COUNT = 4
+_HARD_MAX_BASE_COUNT = 3
 
 
 @dataclass
@@ -153,12 +101,6 @@ def _wilder_atr(high, low, close, period):
 
 
 def _last_known_swing(values: np.ndarray, is_high: bool, left: int, right: int) -> np.ndarray:
-    """
-    Pine ta.pivothigh/pivotlow(left,right) ki tarah swing points nikalta hai,
-    aur unhe sirf `right` bars baad "known/confirmed" maanta hai (causal),
-    phir forward-fill karke har bar t ka "lastSwingHigh/Low" return karta hai
-    (bilkul jaise Pine ke `var float lastSwingHigh` accumulate karta hai).
-    """
     n = len(values)
     revealed = np.full(n, np.nan)
     for j in range(left, n - right):
@@ -255,13 +197,31 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             legOutIdx = 0
             legInIdx = baseCount + 1
-            # reqLegInVol ke liye ek bar aur peeche (legInIdx+1) chahiye
             if t - (legInIdx + 1) < 0 or t - baseCount < 0:
                 continue
             if np.isnan(atr[t - legInIdx]) or np.isnan(atr[t]):
                 continue
 
-            # ---------------- BASE VALIDATION ----------------
+            # ---------------- LEG-IN VALIDATION (Pressure & CLV >= 60%) ----------------
+            legInTR = tr(t, legInIdx)
+            legInLow = l[t - legInIdx]
+            legInHigh = h[t - legInIdx]
+            legInClose = c[t - legInIdx]
+            legInVol = v[t - legInIdx]
+            legInRng = legInHigh - legInLow
+
+            legInIsBull = is_bull(t, legInIdx)
+            legInIsBear = is_bear(t, legInIdx)
+
+            if legInRng == 0:
+                continue
+
+            # Bullish CLV (Buying Pressure): (Close - Low) / Range >= 60%
+            bullClv = (legInClose - legInLow) / legInRng
+            # Bearish CLV (Selling Pressure): (High - Close) / Range >= 60%
+            bearClv = (legInHigh - legInClose) / legInRng
+
+            # ---------------- BASE VALIDATION (Base <= 3 & Base TR < LegIn TR) ----------------
             allBaseValid = True
             maxBaseTR = 0.0
             maxBaseHigh = -1.0
@@ -272,10 +232,15 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                     allBaseValid = False
                     break
                 bTR = tr(t, b)
+                
+                # Rule: Base candle must be smaller than Leg-In candle TR
+                if bTR >= legInTR:
+                    allBaseValid = False
+                    break
+
                 if bTR > maxBaseTR:
                     maxBaseTR = bTR
-                # Pine: `if bTR > (maxBaseAtrMult * atrVal[b])` -> invalid.
-                # yani bTR <= maxBaseAtrMult*ATR chalta hai (non-strict).
+
                 if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
                     allBaseValid = False
                 if h[t - b] > maxBaseHigh:
@@ -284,17 +249,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                     minBaseLow = l[t - b]
 
             if not allBaseValid:
-                continue
-
-            # ---------------- LEG-IN VALIDATION (Pine parity) ----------------
-            legInTR = tr(t, legInIdx)
-            legInLow = l[t - legInIdx]
-            legInHigh = h[t - legInIdx]
-            legInVol = v[t - legInIdx]
-
-            legInIsBull = is_bull(t, legInIdx)
-            legInIsBear = is_bear(t, legInIdx)
-            if not (legInIsBull or legInIsBear):
                 continue
 
             validLegIn = True
@@ -322,7 +276,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             passesTRHierarchy = (legOutTR > legInTR) and (legInTR > maxBaseTR)
             passesVolume = legOutVol > legInVol
 
-            # BOS (strict, close-based only — Pine parity)
+            # BOS (strict, close-based)
             hasBOS = False
             if isDemandLegOut:
                 hasBOS = legOutClose > max(legInHigh, maxBaseHigh)
@@ -347,11 +301,15 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 sweptLiquidity = (maxBaseHigh > swingHighAtT) or (legInHigh > swingHighAtT)
             passesSweepCheck = sweptLiquidity if p["useSweepFilter"] else True
 
-            # ---------------- PATTERN CLASSIFICATION ----------------
-            isRBR = legInIsBull and isDemandLegOut
-            isDBR = legInIsBear and isDemandLegOut
-            isDBD = legInIsBear and isSupplyLegOut
-            isRBD = legInIsBull and isSupplyLegOut
+            # ---------------- PATTERN CLASSIFICATION & PRESSURE CHECK ----------------
+            # RBR: Leg-In Bullish (Buying Pressure) + CLV >= 60%
+            isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
+            # DBR: Leg-In Bearish (Selling Pressure) + Bearish CLV >= 60%
+            isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
+            # DBD: Leg-In Bearish (Selling Pressure) + Bearish CLV >= 60%
+            isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
+            # RBD: Leg-In Bullish (Buying Pressure) + CLV >= 60%
+            isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut
 
             isValid = (
                 (isRBR or isDBR or isDBD or isRBD)
@@ -369,7 +327,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             zoneFoundOnThisBar = True
 
-            # ---------------- DENSITY SCORE (Pine parity) ----------------
+            # ---------------- DENSITY SCORE ----------------
             densityScore = 25
             if legOutTR >= p["hqLegOutAtr"] * atr[t - legOutIdx]:
                 densityScore += 25
@@ -379,7 +337,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 densityScore += 25
             isHQZone = densityScore >= 75
 
-            # ---------------- PROXIMAL / DISTAL (Pine: simple base-based) ----------------
+            # ---------------- PROXIMAL / DISTAL ----------------
             proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
             distVal = minBaseLow if isDemandLegOut else maxBaseHigh
 
@@ -390,7 +348,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             riskAmount = p["accountCapital"] * (p["riskPct"] / 100.0)
             qty = int(riskAmount // riskPerShare) if riskPerShare > 0 else 0
 
-            # ---------------- DUPLICATE CHECK (active-only, bug-fixed) ----------------
+            # ---------------- DUPLICATE CHECK ----------------
             isDuplicate = False
             checked = 0
             for checkZ in reversed(zones):
