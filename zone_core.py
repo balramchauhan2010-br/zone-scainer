@@ -1,17 +1,41 @@
 # -*- coding: utf-8 -*-
 """
-zone_core.py — v7 (Advanced Demand & Supply Engine with Strict CLV & Base Rules)
-==========================================================================
-Updated Rules implemented:
-  - Leg-In Pressure & CLV >= 60%:
-      * RBR & RBD: Buying pressure (Bullish Leg-In, CLV >= 60%)
-      * DBR & DBD: Selling pressure (Bearish Leg-In, Bearish CLV >= 60%)
-  - Base Candles:
-      * Max count <= 3
-      * Every base candle TR < Leg-In TR
-  - Leg-Out:
-      * Always explosive in correct direction (TR >= 1.2 x ATR)
-      * TR Hierarchy: LegOut TR > LegIn TR > MaxBaseTR
+new.py — Zone Core (Modified rules as per user)
+==============================================
+
+NEW/CHANGED VALIDATION RULES (Added on top of existing engine):
+---------------------------------------------------------------
+1) Leg-In candle must show "pressure" using Directional CLV >= 60%:
+   - If Leg-In is Bullish  => Buy pressure:  CLV = (Close-Low)/(High-Low)
+   - If Leg-In is Bearish  => Sell pressure: CLV = (High-Close)/(High-Low)
+   Requirement: CLV >= 0.60
+
+   This enforces:
+   - DBR (Drop-Base-Rally):    Leg-In bearish + sell pressure (CLV>=60%)
+   - RBD (Rally-Base-Drop):    Leg-In bullish + buy pressure  (CLV>=60%)
+   - RBR (Rally-Base-Rally):   Leg-In bullish + buy pressure  (CLV>=60%)
+   - DBD (Drop-Base-Drop):     Leg-In bearish + sell pressure (CLV>=60%)
+
+2) Base candle count must be <= 3 (hard capped).
+
+3) Base candles must be smaller than Leg-In candle (visual rule):
+   maxBaseTR < baseTrMaxFracOfLegIn * legInTR
+   (default baseTrMaxFracOfLegIn = 1.0 => maxBaseTR < legInTR)
+
+4) Leg-In TR must be greater than Base ATR (average ATR of base candles):
+   legInTR > legInTrGtBaseAtrMult * mean(ATR of base candles)
+   (default multiplier = 1.0)
+
+5) Leg-Out remains:
+   - Correct direction (bull/bear)
+   - Explosive (TR >= legOutAtrMult * ATR)
+   plus existing filters (wick%, hierarchy, BOS, volume, imbalance, sweep)
+   as in your given code.
+
+Public entry points:
+    scan_zones(df, params=None, lookback_months=None) -> List[Zone]
+    latest_active_zones(zones, ...)                    -> List[Zone]
+    get_zone_alerts(zones, current_price, ..)          -> List[dict]
 """
 
 from dataclasses import dataclass
@@ -27,22 +51,34 @@ DEFAULT_PARAMS = dict(
     targetRR=5.0,
     slBufferAtr=0.1,
 
-    # --- Algo & filters ---
+    # --- Algo & sweep filters ---
     atrPeriod=14,
     legOutAtrMult=1.2,        # Explosive: TR >= 1.2 x ATR
-    hqLegOutAtr=2.0,          # HQ displacement threshold (score bonus)
-    maxBaseAtrMult=1.0,       # Base candle max range (x ATR)
-    maxWickPct=0.25,          # Max wick% of leg-out (25%)
-    useSweepFilter=True,      # Require liquidity sweep
-    useImbalance=True,        # Require institutional imbalance/displacement
+    hqLegOutAtr=2.0,
+    maxBaseAtrMult=1.0,       # Base candle max TR (x ATR), non-strict <=
+    maxWickPct=0.25,
+    useSweepFilter=True,
+    useImbalance=True,
 
     # --- Base & leg-in rules ---
     minBaseCount=1,
-    maxBaseCount=3,           # Base candles cannot exceed 3
-    reqLegInVol=True,         
-    legInVolMinMult=0.8,      
-    legInMinAtrMult=0.8,      
-    minClvPct=0.60,           # 60% CLV requirement for Leg-In pressure
+    maxBaseCount=3,           # HARD requirement: base candles <= 3
+
+    reqLegInVol=True,
+    legInVolMinMult=0.8,
+    legInMinAtrMult=0.8,      # keeps previous requirement (optional)
+
+    # --- NEW: Leg-In Pressure (Directional CLV) ---
+    enforceLegInCLV=True,
+    clvThreshold=0.60,        # 60%
+
+    # --- NEW: Base must be smaller than Leg-In ---
+    enforceBaseSmallerThanLegIn=True,
+    baseTrMaxFracOfLegIn=1.0,  # require maxBaseTR < 1.0*legInTR
+
+    # --- NEW: Leg-In TR must be > Base ATR (mean ATR of base candles) ---
+    enforceLegInTrGtBaseAtr=True,
+    legInTrGtBaseAtrMult=1.0,
 
     # --- Swing / liquidity sweep detection ---
     swingLeftBars=5,
@@ -116,9 +152,7 @@ def _last_known_swing(values: np.ndarray, is_high: bool, left: int, right: int) 
                 reveal_at = j + right
                 if reveal_at < n:
                     revealed[reveal_at] = center
-
-    out = pd.Series(revealed).ffill().to_numpy()
-    return out
+    return pd.Series(revealed).ffill().to_numpy()
 
 
 def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[float]) -> int:
@@ -138,11 +172,12 @@ def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[
 # Core scan
 # --------------------------------------------------------------------------
 def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
-                lookback_months: Optional[float] = None) -> List[Zone]:
+              lookback_months: Optional[float] = None) -> List[Zone]:
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
 
+    # HARD CAP base candles <= 3
     p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
     p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
 
@@ -163,6 +198,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
     lastSwingLow = _last_known_swing(l, False, p["swingLeftBars"], p["swingRightBars"])
 
     def tr(t, idx):
+        # (Your engine uses High-Low as TR for candle range)
         return h[t - idx] - l[t - idx]
 
     def is_bull(t, idx):
@@ -179,10 +215,31 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
         wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
         return wicks / rng
 
+    def directional_clv(t, idx):
+        """
+        Directional CLV in [0..1]
+        - bullish pressure: close near high
+        - bearish pressure: close near low
+        """
+        i = t - idx
+        rng = h[i] - l[i]
+        if rng <= 0:
+            return 0.0
+        if c[i] > o[i]:  # bullish
+            return (c[i] - l[i]) / rng
+        if o[i] > c[i]:  # bearish
+            return (h[i] - c[i]) / rng
+        return 0.0  # doji -> no pressure
+
     zones: List[Zone] = []
     active_zones: List[Zone] = []
-    min_start = max(atrPeriod, maxBaseCount + 2, p["swingLeftBars"] + p["swingRightBars"] + 1, 11)
 
+    min_start = max(
+        atrPeriod,
+        maxBaseCount + 2,
+        p["swingLeftBars"] + p["swingRightBars"] + 1,
+        11
+    )
     record_from_bar = max(min_start, _resolve_start_bar_for_lookback(df, lookback_months))
 
     for t in range(min_start, n):
@@ -197,59 +254,70 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             legOutIdx = 0
             legInIdx = baseCount + 1
+
+            # reqLegInVol needs legInIdx+1 bar
             if t - (legInIdx + 1) < 0 or t - baseCount < 0:
                 continue
             if np.isnan(atr[t - legInIdx]) or np.isnan(atr[t]):
                 continue
 
-            # ---------------- LEG-IN VALIDATION (Pressure & CLV >= 60%) ----------------
-            legInTR = tr(t, legInIdx)
-            legInLow = l[t - legInIdx]
-            legInHigh = h[t - legInIdx]
-            legInClose = c[t - legInIdx]
-            legInVol = v[t - legInIdx]
-            legInRng = legInHigh - legInLow
-
-            legInIsBull = is_bull(t, legInIdx)
-            legInIsBear = is_bear(t, legInIdx)
-
-            if legInRng == 0:
-                continue
-
-            # Bullish CLV (Buying Pressure): (Close - Low) / Range >= 60%
-            bullClv = (legInClose - legInLow) / legInRng
-            # Bearish CLV (Selling Pressure): (High - Close) / Range >= 60%
-            bearClv = (legInHigh - legInClose) / legInRng
-
-            # ---------------- BASE VALIDATION (Base <= 3 & Base TR < LegIn TR) ----------------
+            # ---------------- BASE VALIDATION ----------------
             allBaseValid = True
             maxBaseTR = 0.0
             maxBaseHigh = -1.0
             minBaseLow = float("inf")
+            baseAtrVals = []
 
             for b in range(1, baseCount + 1):
                 if np.isnan(atr[t - b]):
                     allBaseValid = False
                     break
+
                 bTR = tr(t, b)
-                
-                # Rule: Base candle must be smaller than Leg-In candle TR
-                if bTR >= legInTR:
-                    allBaseValid = False
-                    break
+                maxBaseTR = max(maxBaseTR, bTR)
 
-                if bTR > maxBaseTR:
-                    maxBaseTR = bTR
-
+                # Base candle must be <= maxBaseAtrMult * ATR(base candle)
                 if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
                     allBaseValid = False
-                if h[t - b] > maxBaseHigh:
-                    maxBaseHigh = h[t - b]
-                if l[t - b] < minBaseLow:
-                    minBaseLow = l[t - b]
+
+                maxBaseHigh = max(maxBaseHigh, h[t - b])
+                minBaseLow = min(minBaseLow, l[t - b])
+
+                baseAtrVals.append(float(atr[t - b]))
 
             if not allBaseValid:
                 continue
+
+            baseAtrMean = float(np.mean(baseAtrVals)) if baseAtrVals else float("nan")
+            if np.isnan(baseAtrMean) or baseAtrMean <= 0:
+                continue
+
+            # ---------------- LEG-IN VALIDATION ----------------
+            legInTR = tr(t, legInIdx)
+            legInLow = l[t - legInIdx]
+            legInHigh = h[t - legInIdx]
+            legInVol = v[t - legInIdx]
+
+            legInIsBull = is_bull(t, legInIdx)
+            legInIsBear = is_bear(t, legInIdx)
+            if not (legInIsBull or legInIsBear):
+                continue
+
+            # NEW: base must be smaller than leg-in (visual)
+            if p["enforceBaseSmallerThanLegIn"]:
+                if not (maxBaseTR < (p["baseTrMaxFracOfLegIn"] * legInTR)):
+                    continue
+
+            # NEW: Leg-In TR > Base ATR(mean)
+            if p["enforceLegInTrGtBaseAtr"]:
+                if not (legInTR > (p["legInTrGtBaseAtrMult"] * baseAtrMean)):
+                    continue
+
+            # NEW: Directional CLV >= 60%
+            if p["enforceLegInCLV"]:
+                legInCLV = directional_clv(t, legInIdx)
+                if legInCLV < p["clvThreshold"]:
+                    continue
 
             validLegIn = True
             if p["reqLegInVol"]:
@@ -271,19 +339,22 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if not (isDemandLegOut or isSupplyLegOut):
                 continue
 
+            # Leg-Out must be explosive
             isLegOutExplosive = legOutTR >= (p["legOutAtrMult"] * atr[t - legOutIdx])
+
+            # Keep existing wick filter + hierarchy + volume etc.
             isLegOutWickValid = wick_pct(t, legOutIdx) <= p["maxWickPct"]
             passesTRHierarchy = (legOutTR > legInTR) and (legInTR > maxBaseTR)
             passesVolume = legOutVol > legInVol
 
-            # BOS (strict, close-based)
+            # BOS (close-based)
             hasBOS = False
             if isDemandLegOut:
                 hasBOS = legOutClose > max(legInHigh, maxBaseHigh)
             elif isSupplyLegOut:
                 hasBOS = legOutClose < min(legInLow, minBaseLow)
 
-            # Institutional imbalance / displacement filter
+            # Imbalance filter
             hasImbalance = True
             if p["useImbalance"]:
                 if isDemandLegOut:
@@ -301,15 +372,11 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 sweptLiquidity = (maxBaseHigh > swingHighAtT) or (legInHigh > swingHighAtT)
             passesSweepCheck = sweptLiquidity if p["useSweepFilter"] else True
 
-            # ---------------- PATTERN CLASSIFICATION & PRESSURE CHECK ----------------
-            # RBR: Leg-In Bullish (Buying Pressure) + CLV >= 60%
-            isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
-            # DBR: Leg-In Bearish (Selling Pressure) + Bearish CLV >= 60%
-            isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
-            # DBD: Leg-In Bearish (Selling Pressure) + Bearish CLV >= 60%
-            isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
-            # RBD: Leg-In Bullish (Buying Pressure) + CLV >= 60%
-            isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut
+            # ---------------- PATTERN CLASSIFICATION ----------------
+            isRBR = legInIsBull and isDemandLegOut
+            isDBR = legInIsBear and isDemandLegOut
+            isDBD = legInIsBear and isSupplyLegOut
+            isRBD = legInIsBull and isSupplyLegOut
 
             isValid = (
                 (isRBR or isDBR or isDBD or isRBD)
@@ -429,7 +496,7 @@ def latest_active_zones(zones: List[Zone], include_tested: bool = True) -> List[
 
 
 def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_pct=1.0,
-                     include_tested=True) -> List[Dict[str, Any]]:
+                    include_tested=True) -> List[Dict[str, Any]]:
     alerts = []
     candidates = latest_active_zones(zones, include_tested=include_tested)
     for z in candidates:
