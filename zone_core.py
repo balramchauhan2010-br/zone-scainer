@@ -1,8 +1,8 @@
-
 # -*- coding: utf-8 -*-
+
 """
-zone_core.py — v8.2 (Advanced D&S Engine with Leg-Out TR Multiplier & Refined Rules)
-यह एक एडवांस्ड डिमांड और सप्लाई (D&S) ज़ोन डिटेक्शन इंजन है।
+zone_core.py — v8.3 (Advanced D&S Engine with Leg-Out TR Multiplier, Gap Check & Pre-LegIn Rule)
+Advanced Demand and Supply (D&S) Zone Detection Engine.
 """
 
 from dataclasses import dataclass
@@ -11,65 +11,64 @@ import numpy as np
 import pandas as pd
 
 
-# सिस्टम के डिफ़ॉल्ट पैरामीटर्स की डिक्शनरी
+# System Default Parameters
 DEFAULT_PARAMS = dict(
-    # --- कैपिटल और रिस्क सेटिंग्स ---
-    accountCapital=25000.0,   # कुल खाता कैपिटल ($25,000)
-    riskPct=0.5,              # हर ट्रेड पर 0.5% रिस्क
-    targetRR=5.0,             # रिस्क-टू-रिवॉर्ड रेशियो (1:5)
-    slBufferAtr=0.1,           # स्टॉपलॉस ATR बफर
+    # --- Capital & Risk Settings ---
+    accountCapital=25000.0,   # Total account capital ($25,000)
+    riskPct=0.5,              # Risk percentage per trade (0.5%)
+    targetRR=5.0,             # Target Risk-to-Reward ratio (1:5)
+    slBufferAtr=0.1,           # Stop loss extra ATR buffer (0.1x ATR)
 
-    # --- एल्गोरिदम और फिल्टर्स ---
-    atrPeriod=14,             # ATR इंडिकेटर अवधि
-    volSmaPeriod=20,          # एवरेज वॉल्यूम अवधि
-    legOutTrMult=1.2,         # Leg-Out कैंडल न्यूनतम True Range मल्टीप्लायर
-    hqLegOutAtrMult=2.0,      # हाई क्वालिटी Leg-Out ATR मल्टीप्लायर
-    hqLegInAtrMult=1.5,       # हाई क्वालिटी Leg-In ATR मल्टीप्लायर
-    maxBaseAtrMult=1.0,       # बेस कैंडल अधिकतम ATR साइज
-    maxWickPct=0.25,          # Leg-Out कैंडल में अधिकतम विक % (25%)
+    # --- Algorithm & Filters ---
+    atrPeriod=14,             # ATR period (14 candles)
+    volSmaPeriod=20,          # Average Volume SMA period (20 candles)
+    legOutTrMult=1.2,         # Leg-Out candle minimum TR multiplier (1.2x ATR)
+    hqLegOutAtrMult=2.0,      # High-Quality Leg-Out candle ATR multiplier (2.0x ATR)
+    hqLegInAtrMult=1.5,       # High-Quality Leg-In candle ATR multiplier (1.5x ATR)
+    maxBaseAtrMult=1.0,       # Maximum base candle size (<= 1.0x ATR)
+    maxWickPct=0.25,          # Maximum wick/shadow percentage in Leg-Out (25%)
 
-    # --- बेस और लेग-इन नियम ---
-    minBaseCount=1,           # न्यूनतम बेस कैंडल
-    maxBaseCount=3,           # अधिकतम बेस कैंडल
-    legInMinAtrMult=1.0,      # Leg-In कैंडल न्यूनतम ATR मल्टीप्लायर
-    minClvPct=0.60,           # Leg-In कैंडल न्यूनतम CLV (60%)
-    legInToBaseSizeMult=2.0,  # Leg-In कैंडल सबसे बड़े बेस से कम से कम 2x होनी चाहिए
+    # --- Base & Leg-In Rules ---
+    minBaseCount=1,           # Minimum base candles in zone (1)
+    maxBaseCount=3,           # Maximum base candles in zone (3)
+    legInMinAtrMult=1.0,      # Leg-In TR must be greater than base candle ATR (1.0x ATR)
+    minClvPct=0.60,           # Minimum Close Location Value for Leg-In (60%)
+    legInToBaseSizeMult=2.0,  # Leg-In size must be at least 2x larger than the largest base candle
 
-    # --- इमबैलेंस और स्विंग सेटिंग्स ---
-    useImbalance=True,
-    swingLeftBars=3,
-    swingRightBars=3,
+    # --- Imbalance & Swing Settings ---
+    useImbalance=True,        # Active imbalance check (Gap size must not exceed Leg-In TR)
+    swingLeftBars=3,          # Swing left bars (3)
+    swingRightBars=3,         # Swing right bars (3)
 )
 
 
-_HARD_MAX_BASE_COUNT = 3
+_HARD_MAX_BASE_COUNT = 3  # Hard limit locked to 3 base candles max
 
 
-# ज़ोन डेटा स्ट्रक्चर
 @dataclass
 class Zone:
-    proxVal: float                  # प्रॉक्सिमल लाइन (एंट्री)
-    distVal: float                  # डिस्टल लाइन (SL स्तर)
-    slVal: float                    # स्टॉपलॉस प्राइस
-    tpVal: float                    # टेक प्रॉफिट प्राइस
-    isDemand: bool                  # True = Demand, False = Supply
-    isHQ: bool                      # High Quality Zone Flag
-    densityScore: int               # ज़ोन क्वालिटी स्कोर (0-100)
-    patternType: str = ""           # RBR, DBR, DBD, RBD
-    zoneCategory: str = ""          # Continuation / Reversal
-    state: str = "Fresh"            # Fresh, Tested, Broken
-    touchCount: int = 0             # ज़ोन टेस्ट काउंट
-    originalDensityScore: int = 0   # शुरुआती स्कोर
-    startBarIndex: int = 0          # शुरुआत कैंडल इंडेक्स
-    createdBarIndex: int = 0        # निर्माण कैंडल इंडेक्स
-    baseCount: int = 0              # बेस कैंडल की संख्या
-    timestamp: object = None        # ज़ोन टाइमस्टैम्प
-    qty: float = 0.0                # रिस्क के आधार पर पोजीशन साइज
-    sweptLiquidity: bool = False    # फ्लैग (पिछली संगतता के लिए)
+    proxVal: float                  # Proximal line (Entry price level)
+    distVal: float                  # Distal line (Zone outer edge)
+    slVal: float                    # Stop Loss level
+    tpVal: float                    # Take Profit target
+    isDemand: bool                  # True = Demand Zone, False = Supply Zone
+    isHQ: bool                      # High Quality flag (True/False)
+    densityScore: int               # Zone quality score (0 to 100)
+    patternType: str = ""           # Pattern type: RBR, DBR, DBD, RBD
+    zoneCategory: str = ""          # Category: Continuation or Reversal
+    state: str = "Fresh"            # State: Fresh, Tested, or Broken
+    touchCount: int = 0             # Number of re-tests
+    originalDensityScore: int = 0   # Initial density score at creation
+    startBarIndex: int = 0          # Zone start candle index
+    createdBarIndex: int = 0        # Zone creation (Leg-Out) candle index
+    baseCount: int = 0              # Number of base candles
+    timestamp: object = None        # Creation timestamp
+    qty: float = 0.0                # Trade quantity based on risk management
+    sweptLiquidity: bool = False    # Liquidity sweep flag
 
 
-# Wilder's ATR कैलकुलेशन
 def _wilder_atr(high, low, close, period):
+    """Calculates Average True Range (ATR) using Wilder's Smoothing Method."""
     n = len(high)
     tr = np.empty(n)
     tr[0] = high[0] - low[0]
@@ -92,8 +91,8 @@ def _wilder_atr(high, low, close, period):
     return atr
 
 
-# लुकबैक महीनों के हिसाब से शुरुआती कैंडल तय करना
 def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[float]) -> int:
+    """Determines start bar index based on lookback months."""
     n = len(df)
     if lookback_months is None or lookback_months <= 0 or n == 0:
         return 0
@@ -106,11 +105,9 @@ def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[
     return int(max(0, n - approx_bars))
 
 
-# --------------------------------------------------------------------------
-# मुख्य स्कैनिंग इंजन (Core Scan Function)
-# --------------------------------------------------------------------------
 def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                lookback_months: Optional[float] = None) -> List[Zone]:
+    """Core function to scan and detect Demand & Supply Zones."""
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
@@ -129,7 +126,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
     maxBaseCount = p["maxBaseCount"]
     atrPeriod = p["atrPeriod"]
 
-    # ATR एवं वॉल्यूम SMA (Average Volume)
     atr = _wilder_atr(h, l, c, atrPeriod)
     vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"], min_periods=1).mean().to_numpy()
 
@@ -155,7 +151,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
     min_start = max(atrPeriod, maxBaseCount + 2, p["swingLeftBars"] + p["swingRightBars"] + 1, 11)
     record_from_bar = max(min_start, _resolve_start_bar_for_lookback(df, lookback_months))
 
-    # Backward compatibility support for legOutTrMult / legOutAtrMult
     legOutMult = p.get("legOutTrMult", p.get("legOutAtrMult", 1.2))
 
     for t in range(min_start, n):
@@ -170,12 +165,14 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             legOutIdx = 0
             legInIdx = baseCount + 1
-            if t - (legInIdx + 1) < 0 or t - baseCount < 0:
+            preLegInIdx = legInIdx + 1
+
+            if t - preLegInIdx < 0 or t - baseCount < 0:
                 continue
             if np.isnan(atr[t - legInIdx]) or np.isnan(atr[t]):
                 continue
 
-            # ---------------- LEG-IN की जाँच ----------------
+            # --- LEG-IN CHECK ---
             legInTR = tr(t, legInIdx)
             legInLow = l[t - legInIdx]
             legInHigh = h[t - legInIdx]
@@ -189,24 +186,38 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if legInRng == 0:
                 continue
 
+            # --- PRE-LEG-IN 50% COVERAGE RULE ---
+            preLegInHigh = h[t - preLegInIdx]
+            preLegInLow = l[t - preLegInIdx]
+            preLegInIsBull = is_bull(t, preLegInIdx)
+            preLegInIsBear = is_bear(t, preLegInIdx)
+
+            isOppositeColorPreLegIn = (legInIsBull and preLegInIsBear) or (legInIsBear and preLegInIsBull)
+
+            if isOppositeColorPreLegIn:
+                overlapHigh = min(legInHigh, preLegInHigh)
+                overlapLow = max(legInLow, preLegInLow)
+                overlapRange = max(0.0, overlapHigh - overlapLow)
+
+                if legInTR > 0 and (overlapRange / legInTR) >= 0.50:
+                    continue
+
             bullClv = (legInClose - legInLow) / legInRng
             bearClv = (legInHigh - legInClose) / legInRng
 
-            # ---------------- BASE की जाँच ----------------
+            # --- BASE CHECK ---
             allBaseValid = True
             maxBaseTR = 0.0
             maxBaseHigh = -1.0
             minBaseLow = float("inf")
             hasOppositeColorBase = False
 
-            # सभी बेस कैंडल्स में से सबसे बड़ी baseTR और High/Low निकालना
             for b in range(1, baseCount + 1):
                 if np.isnan(atr[t - b]):
                     allBaseValid = False
                     break
                 bTR = tr(t, b)
 
-                # बेस कैंडल 1x ATR से छोटी होनी चाहिए
                 if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
                     allBaseValid = False
                     break
@@ -222,16 +233,14 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if not allBaseValid or maxBaseTR == 0:
                 continue
 
-            # मुख्य नियम: Leg-In कैंडल सबसे बड़ी बेस कैंडल (maxBaseTR) से कम से कम 2x बड़ी होनी चाहिए
             if legInTR < (p["legInToBaseSizeMult"] * maxBaseTR):
                 continue
 
-            # Leg-In ATR साइज चेकिंग
             validLegIn = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
             if not validLegIn:
                 continue
 
-            # ---------------- LEG-OUT की जाँच ----------------
+            # --- LEG-OUT CHECK ---
             legOutTR = tr(t, legOutIdx)
             legOutHigh = h[t - legOutIdx]
             legOutLow = l[t - legOutIdx]
@@ -243,21 +252,28 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if not (isDemandLegOut or isSupplyLegOut):
                 continue
 
-            # True Range मल्टीप्लायर के आधार पर Explosive चेक
             isLegOutExplosive = legOutTR >= (legOutMult * atr[t - legOutIdx])
             isLegOutWickValid = wick_pct(t, legOutIdx) <= p["maxWickPct"]
             passesTRHierarchy = (legOutTR > legInTR) and (legInTR > maxBaseTR)
             passesVolume = legOutVol > legInVol
 
-            # इमबैलेंस चेक
+            # --- PRICE IMBALANCE CHECK ---
             hasImbalance = True
+            imbalanceGap = 0.0
             if p["useImbalance"]:
                 if isDemandLegOut:
                     hasImbalance = (legOutLow > maxBaseHigh) or (legOutClose > legInHigh)
+                    if legOutLow > maxBaseHigh:
+                        imbalanceGap = legOutLow - maxBaseHigh
                 elif isSupplyLegOut:
                     hasImbalance = (legOutHigh < minBaseLow) or (legOutClose < legInLow)
+                    if minBaseLow > legOutHigh:
+                        imbalanceGap = minBaseLow - legOutHigh
 
-            # ---------------- पैटर्न क्लासिफिकेशन ----------------
+                if hasImbalance and (imbalanceGap > legInTR):
+                    hasImbalance = False
+
+            # --- PATTERN CLASSIFICATION ---
             isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
             isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
             isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
@@ -277,30 +293,24 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             zoneFoundOnThisBar = True
 
-            # ---------------- डेंसिटी स्कोर (Density Score Calculation) ----------------
+            # --- DENSITY SCORE CALCULATION ---
             densityScore = 0
 
-            # 1. Zone में केवल 1 Base कैंडल हो (+15 अंक)
             if baseCount == 1:
                 densityScore += 15
 
-            # 2. Leg-In कैंडल Explosive हो (+10 अंक)
             if legInTR >= (p["hqLegInAtrMult"] * atr[t - legInIdx]):
                 densityScore += 10
 
-            # 3. Leg-Out कैंडल Explosive हो (+15 अंक)
             if legOutTR >= (p["hqLegOutAtrMult"] * atr[t - legOutIdx]):
                 densityScore += 15
 
-            # 4. Leg-In > 2x Base size और Leg-Out > 2x Leg-In size हो (+15 अंक)
             if (legInTR >= 2.0 * maxBaseTR) and (legOutTR >= 2.0 * legInTR):
                 densityScore += 15
 
-            # 5. Leg-Out कैंडल में एवरेज से ज्यादा वॉल्यूम हो (+10 अंक)
             if legOutVol > vol_sma[t - legOutIdx]:
                 densityScore += 10
 
-            # 6. Leg-Out का क्लोज़ आधे से ऊपर (Demand) या आधे से नीचे (Supply) हो (+15 अंक)
             if isDemandLegOut:
                 legOutBodyPos = (legOutClose - legOutLow) / legOutTR if legOutTR > 0 else 0
                 if legOutBodyPos >= 0.50:
@@ -310,7 +320,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 if legOutBodyPos >= 0.50:
                     densityScore += 15
 
-            # 7. डिमांड ज़ोन में Base कैंडल Red हो या सप्लाई ज़ोन में Base कैंडल Green हो (+10 अंक)
             for b in range(1, baseCount + 1):
                 if isDemandLegOut and is_bear(t, b):
                     hasOppositeColorBase = True
@@ -321,13 +330,11 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if hasOppositeColorBase:
                 densityScore += 10
 
-            # 8. Fresh Zone (प्राइस ने अभी बेस कैंडल को टच न किया हो) (+10 अंक)
-            densityScore += 10
+            densityScore += 10  # Freshness bonus
 
-            # 70 से अधिक अंक वाले ज़ोन High Quality माने जाएँगे
             isHQZone = densityScore >= 70
 
-            # ---------------- प्रॉक्सिमल और डिस्टल लाइन्स (एंट्री/SL/TP/Qty) ----------------
+            # --- PROXIMAL, DISTAL, SL & TP ---
             proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
             distVal = minBaseLow if isDemandLegOut else maxBaseHigh
 
@@ -335,11 +342,10 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             riskPerShare = abs(proxVal - slVal)
             tpVal = (proxVal + riskPerShare * p["targetRR"]) if isDemandLegOut else (proxVal - riskPerShare * p["targetRR"])
 
-            # रिस्क और पोजीशन साइज़ (Quantity)
             riskAmount = p["accountCapital"] * (p["riskPct"] / 100.0)
             qty = round(riskAmount / riskPerShare, 2) if riskPerShare > 0 else 0.0
 
-            # ---------------- डुप्लीकेट ज़ोन फिल्टर ----------------
+            # --- DUPLICATE ZONE FILTER ---
             isDuplicate = False
             checked = 0
             for checkZ in reversed(zones):
@@ -364,6 +370,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 patternType, zoneCategory = "RBD", "Reversal"
 
             leftBar = t - baseCount
+
             newZone = Zone(
                 proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
                 isDemand=isDemandLegOut, isHQ=isHQZone, densityScore=densityScore,
@@ -375,7 +382,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             zones.append(newZone)
             active_zones.append(newZone)
 
-        # ---------------- ज़ोन स्टेटस ट्रैकिंग (Fresh, Tested, Broken) ----------------
+        # --- ZONE STATE TRACKING ---
         if active_zones:
             lo_t, hi_t = l[t], h[t]
             still_active = []
@@ -415,12 +422,14 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
 
 def latest_active_zones(zones: List[Zone], include_tested: bool = True) -> List[Zone]:
+    """Returns active (Fresh or Tested) zones."""
     states = {"Fresh"} | ({"Tested"} if include_tested else set())
     return [z for z in zones if z.state in states]
 
 
 def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_pct=1.0,
                      include_tested=True) -> List[Dict[str, Any]]:
+    """Generates live alerts for active zones near current price."""
     alerts = []
     candidates = latest_active_zones(zones, include_tested=include_tested)
     for z in candidates:
@@ -432,8 +441,10 @@ def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_p
         else:
             diff_pct = (z.proxVal - current_price) / z.proxVal
             direction = "SUPPLY"
+
         if not (min_proximity_pct <= diff_pct <= max_proximity_pct):
             continue
+
         alerts.append({
             "direction": direction, "pattern": z.patternType, "category": z.zoneCategory,
             "entry": z.proxVal, "sl": z.slVal, "tp": z.tpVal, "is_hq": z.isHQ,
