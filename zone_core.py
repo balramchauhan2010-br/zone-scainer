@@ -101,7 +101,7 @@ DEFAULT_PARAMS = dict(
     hqLegOutTrMult=2.0,
     hqLegInAtrMult=1.5,
     maxBaseAtrMult=1.0,
-    maxWickPct=0.30,
+    maxWickPct=0.40,
 
     minBaseCount=1,
     maxBaseCount=3,
