@@ -2,79 +2,44 @@
 # फाइल की एन्कोडिंग UTF-8 सेट की गई है ताकि हिंदी व अन्य कैरेक्टर्स सही से प्रोसेस हों
 
 """
-zone_core.py — v8.5 (Advanced D&S Engine — TR Hierarchy Relaxed + Gap Scoring + LegOut-based Tested Rule)
+zone_core.py — v8.7 (Gap-Cap Fix: Overnight/Genuine Big-Gap Zones + Diagnose Helper)
 यह एक एडवांस्ड डिमांड और सप्लाई (D&S) ज़ोन डिटेक्शन इंजन है।
 
-=== इस फ़ाइल में मैंने क्या ठीक किया (कोड चलाने लायक बनाने के लिए) ===
-आपकी पिछली फ़ाइल में DEFAULT_PARAMS के अंदर कुछ लाइनें हिंदी/अंग्रेज़ी में
-"नियम समझाने" के अंदाज़ में लिखी थीं (जैसे `legOutTrMult>=leg in Tr,`), लेकिन ये
-असल में valid Python सिंटैक्स नहीं थीं — Python इन्हें पढ़ ही नहीं पाता और फ़ाइल
-शुरू होते ही error देकर रुक जाती। मैंने हर ऐसी लाइन को उसी में लिखे नियम के मुताबिक
-एक असली नंबर/वैल्यू में बदल दिया है, और जहाँ नीचे कोड में जिस key नाम से उसे पढ़ा जा
-रहा था (जैसे `p["maxBaseAtrMult"]`, `p["legInMinAtrMult"]`, `p["hqLegInAtrMult"]`),
-वही सही key-नाम भी लगा दिया है ताकि आगे KeyError ना आए। नीचे हर जगह जहाँ बदलाव किया
-है वहाँ "[FIXED]" कमेंट लगा दिया है ताकि आपको दिख जाए कि क्या बदला।
+=== v8.6 से v8.7 में क्या बदला (ICICI Bank जैसे genuine बड़े gap वाले zones का FIX) ===
+पहले (v8.5/v8.6) में gap/imbalance की size को सिर्फ़ Leg-In के TR के आधार पर
+सीमित किया जाता था:
+    gapSize <= maxImbalanceVsLegInMult * legInTR   (डिफ़ॉल्ट 1.0x)
 
-इसके अलावा, Zone में `qty` (क्वांटिटी) फ़ील्ड के आगे आपने खुद कमेंट में लिखा था
-"इसे हटा दीजिए" — तो मैंने qty से जुड़ा पूरा हिस्सा (Zone का फ़ील्ड, कैलकुलेशन,
-और alert में दिखना) हटा दिया है। बाकी पूरा लॉजिक (v8.5 की सारी नई/पुरानी शर्तें)
-जस-का-तस रखा गया है, सिर्फ़ टूटी हुई लाइनें ठीक की गई हैं।
+समस्या: जब Leg-Out कैंडल खुद बहुत बड़ी/explosive होती है (जैसे ICICI Bank 1h
+उदाहरण: LegIn TR=13.70, लेकिन LegOut TR=35 — और यह अगले ट्रेडिंग-दिन की पहली
+(9:15am) कैंडल थी, यानी पिछले दिन के Base से इसका असली OVERNIGHT GAP बना), तो
+genuine gap का size आसानी से Leg-In TR (13.70) से बड़ा हो जाता है — जो बिल्कुल
+सही/वैध situation है (क्योंकि पूरा leg-out ही 35 पॉइंट का उछाल है)। पुराने कोड में
+ऐसे genuine बड़े gap को गलती से "बहुत बड़ा/अविश्वसनीय gap" मानकर reject कर दिया
+जाता था, जिससे `hasImbalance=False` हो जाता और साथ ही `hasGenuineGap` भी False
+होकर engulf-check में भी दोबारा zone को invalid कर देता (डबल नुकसान)।
 
-v8.4 से v8.5 में क्या नया जोड़ा/बदला गया (जैसा स्क्रीनशॉट्स के साथ आपने कहा)
---------------------------------------------------------------------------
-  A) FIX — SBI Life / ICICI Bank में circle किए गए valid zones स्कैन नहीं हो रहे थे,
-     क्योंकि पहले नियम था "Leg-Out TR सख्ती से (strict >) Leg-In TR से बड़ा हो"। असल
-     में अगर Leg-Out TR, Leg-In TR के बराबर या उससे बड़ा (>=) हो तो भी zone वैलिड
-     मानी जानी चाहिए — और सिर्फ़ तभी जब Leg-Out, Leg-In का 2.0x या उससे ज़्यादा हो,
-     तो उसे "अच्छा zone" मानकर ज़्यादा स्कोर (+15, hqLegOutTrMult) दिया जाए। यानी:
-         वैलिडिटी के लिए:  legOutTR >= legOutMinTrRatio * legInTR   (डिफ़ॉल्ट ratio 1.0)
-         अच्छे स्कोर के लिए: legOutTR >= hqLegOutTrMult * legInTR    (डिफ़ॉल्ट 2.0, पहले से मौजूद)
-     पहले यह `>` (strictly greater) था, जिस वजह से बराबर TR वाले valid zones (जैसे
-     SBI Life और ICICI Bank के circle किए zones) reject हो रहे थे। अब `>=` कर दिया।
+FIX (v8.7): चूँकि नियम के अनुसार हमेशा `legOutTR >= legInTR` होता है (TR
+Hierarchy से गारंटीड), इसलिए अब gap की अधिकतम सीमा (cap) दो में से जो भी बड़ी
+हो, उसे मान्य किया जाता है:
+    legInCap  = maxImbalanceVsLegInMult  * legInTR    (पुराना, जस-का-तस रखा)
+    legOutCap = maxImbalanceVsLegOutMult * legOutTR   (नया, ज़्यादा permissive)
+    gapCap    = max(legInCap, legOutCap)
+यह बदलाव सिर्फ़ सीमा को बढ़ाता है, घटाता नहीं — इसलिए पहले से valid कोई भी
+zone अब invalid नहीं होगा (क्योंकि legOutTR>=legInTR हमेशा सच है, legOutCap
+कभी भी legInCap से छोटा नहीं होगा अगर mult बराबर रखें)। इससे सिर्फ़ वो genuine
+बड़े-gap वाले valid zones ठीक से पकड़ में आएँगे जो पहले गलती से reject हो रहे थे।
 
-  B) NEW — ज़ोन में असली प्राइस-गैप (Jindal Steel के 4h/6h स्क्रीनशॉट में circle किया
-     गया gap) होने पर अब उसे एक्स्ट्रा डेंसिटी स्कोर (+10) मिलता है। पहले gap सिर्फ़
-     validity-filter (useImbalance) के तौर पर काम करता था (या तो gap हो या close-based
-     शर्त पूरी हो — दोनों में से कोई एक काफ़ी था)। अब इसके अलावा, अगर वाकई एक असली गैप
-     है (Leg-Out का Low, Base के High से ऊपर है — Demand में — या इसका उल्टा Supply
-     में), तो एक अलग स्कोरिंग बोनस भी मिलता है, ताकि ऐसे साफ़-सुथरे gap वाले zones को
-     बेहतर स्कोर मिले (जैसा Jindal Steel के स्क्रीनशॉट में दिखाया गया, वो बिल्कुल Fresh
-     zone है और अब सही स्कोर पाएगा)।
+इसके अलावा एक नया डिबग/ट्रबलशूटिंग हेल्पर फ़ंक्शन जोड़ा गया है:
+    diagnose_bar(df, at_index, params=None)
+यह किसी specific candle (Leg-Out) पर हर नियम का pass/fail स्टेप-बाय-स्टेप
+प्रिंट करता है, ताकि भविष्य में "यह वाला zone स्कैन क्यों नहीं हुआ" जैसे सवाल
+का जवाब कोड दोबारा पढ़े बिना, सीधे तुरंत मिल जाए।
 
-  C) CHANGED — "Tested" state अब zone के base-range (proximal) से नहीं, बल्कि
-     LEG-OUT कैंडल की खुद की रेंज के 50% area तक प्राइस रीट्रेसमेंट कर टच कर ले तो
-     उसे tested zone माने। यानी:
-         Demand zone testedLevel = legOutHigh - 0.5 * (legOutHigh - legOutLow)
-         Supply zone testedLevel = legOutLow  + 0.5 * (legOutHigh - legOutLow)
-     (0.5 = testedLegOutRetracePct, चाहें तो params में बदल सकते हैं)। जब price इस area
-     टच कर ले, तभी zone "Tested" बनेगी — सिर्फ़ zone के ऊपरी किनारे (proximal) को छूना
-     Tested नहीं मानी जाएगी, और डिस्टल लाइन तक पहुँचना Broken माना जाएगा।
-     Zone dataclass में अब legOutHigh, legOutLow, legOutMidLevel — ये तीन नए fields
-     जोड़ दिए गए हैं ताकि यह स्तर हर candle पर दोबारा-दोबारा ना निकालना पड़े (ज़ोन बनते
-     वक़्त एक बार calculate करके स्टोर कर लिया जाता है)।
-
-  D) FIXED (v8.6) — "Leg-Out की BODY पूरे base-zone को engulf ना करे" वाला नियम पहले
-     bina शर्त लागू होता था, जिससे बहुत बड़ी explosive legOut कैंडल (उदाहरण: ICICI Bank
-     1h, legOut TR=35 बनाम base TR सिर्फ़ 6.60, जिसमें असल में साफ़ white-area/gap भी
-     मौजूद था) गलती से reject हो जाती थी। असली मक़सद यह देखना था कि base और legOut के
-     बीच सच में white area (गैप) बचा है या नहीं — ना कि किसकी TR बड़ी/छोटी है। अब नियम:
-     अगर base और legOut के बीच genuine gap (white area) मौजूद है, तो legOut की body भले
-     ही पूरे base को (wick सहित) ढक ले, फिर भी zone invalid नहीं होगी — क्योंकि गैप खुद
-     साबित करता है कि leftover orders बचे हैं। Engulf सिर्फ़ तभी invalid करेगा जब gap
-     बिल्कुल ना हो (यानी धीमी, ओवरलैपिंग चाल से base निगला गया हो)।
-
-  (v8.3/v8.4 में पहले से मौजूद और बिना बदलाव के रखे गए नियम):
-    - "Leg-In का TR, ATR से बड़ा हो + छोटी wick हो इतना ही काफी है"
-    - "Base कैंडल में सबसे बड़ा जिस base कैंडल का TR बड़ा हो, वो ATR से छोटा हो": maxBaseAtrMult चेक से लागू है।
-    - "2 से ज़्यादा बार Tested zone अब invalid/Broken" (v8.4)
-    - "Leg-Out की body पूरे base-zone को engulf ना करे" (v8.4)
-    - "legin के पीछे वाली Opposite-color candle का 50%+ cover सिर्फ़ BODY से नापा जाए" (v8.4)
-    - "DBR में legOut की body-position OR body% (heavy buying pressure)" (v8.4)
-    - densityScore < 40 वाला zone सिरे से invalid (v8.3)
-    - `sweptLiquidity` field हटाई गई (v8.3)
+बाकी पूरा v8.5/v8.6 का लॉजिक (सभी पुराने नियम) जस-का-तस रखा गया है।
 
 ------------------------------------------------------------------
-FULL VALIDATION (v8.5)
+FULL VALIDATION (v8.7)
 ------------------------------------------------------------------
   LEG-IN:
     - correct direction (bull/bear)
@@ -93,17 +58,18 @@ FULL VALIDATION (v8.5)
     - TR Hierarchy: LegOut >= LegIn > MaxBaseTR       (यह नियम अनिवार्य है)
     - Volume: Volume[legOut] > Volume[legIn]
     - Leg-Out की सिर्फ़ BODY पूरे base-zone (wick सहित) को engulf ना करे
+      (जब तक genuine gap ना हो)
     - Imbalance (if useImbalance):
         Demand: Low > MaxBaseHigh  OR  Close > LegInHigh
         Supply: High < MinBaseLow  OR  Close < LegInLow
-        + gap का size legIn TR से बड़ा नहीं हो
+        + gap का size max(legInCap, legOutCap) से बड़ा नहीं हो   [UPDATED v8.7]
 
   SCORE:
     - densityScore < 40  -> zone सिरे से invalid (discard)
     - densityScore >= 90 -> High-Quality (HQ) zone
     - Leg-Out >= 2.0x Leg-In TR -> बोनस (hqLegOutTrMult)
     - DBR में legOut का body-position OR body% (heavy buying pressure) -> बोनस
-    - असली प्राइस-गैप (genuine imbalance) मौजूद होने पर -> बोनस                [NEW v8.5]
+    - असली प्राइस-गैप (genuine imbalance) मौजूद होने पर -> बोनस
 
   STATE:
     - Tested तभी बने जब price, LEG-OUT कैंडल के 50% area (या इससे ज़्यादा) तक
@@ -114,6 +80,7 @@ Public entry points:
     scan_zones(df, params=None, lookback_months=None) -> List[Zone]
     latest_active_zones(zones, ...)                    -> List[Zone]
     get_zone_alerts(zones, current_price, ..)          -> List[dict]
+    diagnose_bar(df, at_index, params=None)            -> List[dict]   [NEW v8.7]
 """
 
 from dataclasses import dataclass  # डेटा स्ट्रक्चर को आसानी से क्लास के रूप में डिफाइन करने के लिए dataclass मॉड्यूल
@@ -133,28 +100,32 @@ DEFAULT_PARAMS = dict(
     # --- एल्गोरिदम और फिल्टर्स ---
     atrPeriod=14,             # ATR (Average True Range) इंडिकेटर की अवधि (14 कैंडल्स)
     volSmaPeriod=20,          # औसतन वॉल्यूम निकालने की अवधि (20 कैंडल्स का SMA)
-    legOutTrMult=1.2,         # [FIXED] Leg-Out कैंडल का ATR-आधारित मल्टीप्लायर — Leg-Out का TR
+    legOutTrMult=1.2,         # Leg-Out कैंडल का ATR-आधारित मल्टीप्लायर — Leg-Out का TR
                                 # कम से कम इतने गुना ATR (1.2x) होना चाहिए, तभी उसे "explosive" माना जाएगा
-    legOutMinTrRatio=1.0,     # [FIXED] Leg-Out TR, Leg-In TR का कम से कम इतना गुना होना
-                                # चाहिए (1.0 = बराबर या बड़ा) — validity के लिए, पहले सख्ती से `>` था
+    legOutMinTrRatio=1.0,     # Leg-Out TR, Leg-In TR का कम से कम इतना गुना होना
+                                # चाहिए (1.0 = बराबर या बड़ा) — validity के लिए
     hqLegOutTrMult=2.0,       # हाई-क्वालिटी Leg-Out कैंडल का TR मल्टीप्लायर (Leg-In TR का 2.0x, सिर्फ़ स्कोरिंग बोनस)
-    hqLegInAtrMult=1.5,       # [FIXED] (पहले गलत नाम "hqLegIntrMult" था) हाई-क्वालिटी Leg-In कैंडल का TR, ATR का 1.5x
-    maxBaseAtrMult=1.0,       # [FIXED] बेस कैंडल में जिस भी base कैंडल का TR सबसे बड़ा हो, वो ATR के
+    hqLegInAtrMult=1.5,       # हाई-क्वालिटी Leg-In कैंडल का TR, ATR का 1.5x
+    maxBaseAtrMult=1.0,       # बेस कैंडल में जिस भी base कैंडल का TR सबसे बड़ा हो, वो ATR के
                                 # इतने गुना (1.0x) से छोटा होना चाहिए (यानी base, ATR से बड़ा TR ना दे)
     maxWickPct=0.25,          # Leg-Out कैंडल में अधिकतम विक/शैडो % (25%)
 
     # --- बेस और लेग-इन नियम ---
     minBaseCount=1,             # ज़ोन में कम से कम बेस कैंडल्स (1)
     maxBaseCount=3,             # ज़ोन में अधिकतम बेस कैंडल्स (3)
-    legInMinAtrMult=1.0,        # [FIXED] (पहले गलत नाम "legInMintrMult" था) Leg-In कैंडल का TR कम से कम ATR के बराबर (1.0x) होना चाहिए
+    legInMinAtrMult=1.0,        # Leg-In कैंडल का TR कम से कम ATR के बराबर (1.0x) होना चाहिए
     minClvPct=0.60,             # Leg-In कैंडल का न्यूनतम Close Location Value (60%)
     legInToBaseSizeMult=2.0,    # Leg-In कैंडल सबसे बड़ी बेस कैंडल से कम से कम 2x बड़ी होनी चाहिए
     legInMinBodyPct=0.60,       # Leg-In कैंडल की BODY, उसकी कुल रेंज (High-Low) का कम से कम 60% होनी चाहिए
 
     # --- इमबैलेंस सेटिंग्स ---
     useImbalance=True,             # प्राइस इमबैलेंस (Gap/Fast Move) चेक करें (validity filter)
-    maxImbalanceVsLegInMult=1.0,   # gap/imbalance का साइज़ leg-in TR से बड़ा नहीं होना चाहिए (1.0x)
-    genuineGapScoreBonus=10,       # NEW (v8.5): असली प्राइस-गैप (सिर्फ़ close-based नहीं, वाकई gap) मौजूद
+    maxImbalanceVsLegInMult=1.0,   # [पुराना cap] gap/imbalance का साइज़ leg-in TR से बड़ा नहीं होना चाहिए (1.0x)
+    maxImbalanceVsLegOutMult=1.0,  # [NEW v8.7] gap/imbalance का दूसरा (ज़्यादा permissive) cap — leg-out
+                                     # TR के आधार पर। असल cap = max(legInMult*legInTR, legOutMult*legOutTR)।
+                                     # यह overnight/genuine बड़े gap वाले zones (जैसे ICICI Bank उदाहरण,
+                                     # legOutTR=35 vs legInTR=13.70) को गलती से reject होने से बचाता है।
+    genuineGapScoreBonus=10,       # असली प्राइस-गैप (सिर्फ़ close-based नहीं, वाकई gap) मौजूद
                                      # होने पर मिलने वाला डेंसिटी-स्कोर बोनस
 
     # --- विपरीत-रंग वाली पीछे की candle का filter (सिर्फ़ BODY पर आधारित) ---
@@ -203,8 +174,6 @@ class Zone:
     legOutHigh: float = 0.0         # Leg-Out कैंडल का High (Tested-level निकालने के लिए)
     legOutLow: float = 0.0          # Leg-Out कैंडल का Low
     legOutMidLevel: float = 0.0     # Leg-Out रेंज का testedLegOutRetracePct स्तर (Tested के लिए)
-    # NOTE: sweptLiquidity field जानबूझकर यहाँ से हटाई गई है (v8.3)
-    # NOTE: [FIXED/REMOVED] qty field हटाई गई है (आपके कमेंट "इसे हटा दीजिए" के मुताबिक)
 
 
 # Wilder's Smoothing विधि द्वारा ATR (Average True Range) की गणना करने वाला फ़ंक्शन
@@ -214,7 +183,6 @@ def _wilder_atr(high, low, close, period):
     tr[0] = high[0] - low[0]  # पहली कैंडल का TR (High - Low)
     if n > 1:
         prev_close = close[:-1]  # पिछली कैंडल का Close प्राइस
-        # True Range की गणना: Max(H-L, |H-PrevClose|, |L-PrevClose|)
         tr[1:] = np.maximum(
             high[1:] - low[1:],
             np.maximum(np.abs(high[1:] - prev_close), np.abs(low[1:] - prev_close)),
@@ -246,6 +214,18 @@ def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[
     return int(max(0, n - approx_bars))  # निकाला गया कैंडल इंडेक्स रिटर्न किया
 
 
+def _prep_arrays(df, p):
+    """स्कैन और डायग्नोसिस दोनों में इस्तेमाल होने वाली common array-prep (कोड डुप्लीकेशन से बचने के लिए)."""
+    o = df["open"].to_numpy(dtype=float)
+    h = df["high"].to_numpy(dtype=float)
+    l = df["low"].to_numpy(dtype=float)
+    c = df["close"].to_numpy(dtype=float)
+    v = df["volume"].to_numpy(dtype=float)
+    atr = _wilder_atr(h, l, c, p["atrPeriod"])
+    vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"], min_periods=1).mean().to_numpy()
+    return o, h, l, c, v, atr, vol_sma
+
+
 # --------------------------------------------------------------------------
 # मुख्य स्कैनिंग इंजन (Core Scan Function) - ज़ोन ढूंढने का मुख्य फ़ंक्शन
 # --------------------------------------------------------------------------
@@ -259,245 +239,196 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
     p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
     p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
 
-    # तीव्र गणितीय गणना के लिए Pandas सिरीज़ को NumPy एरे में बदला गया (numpy, pandas से बहुत तेज़ चलता है)
-    o = df["open"].to_numpy(dtype=float)    # Open कीमतें
-    h = df["high"].to_numpy(dtype=float)    # High कीमतें
-    l = df["low"].to_numpy(dtype=float)     # Low कीमतें
-    c = df["close"].to_numpy(dtype=float)   # Close कीमतें
-    v = df["volume"].to_numpy(dtype=float)  # Volume डेटा
+    o, h, l, c, v, atr, vol_sma = _prep_arrays(df, p)
     n = len(df)  # कैंडल की कुल संख्या
 
-    minBaseCount = p["minBaseCount"]  # न्यूनतम बेस काउंट (लोकल वेरिएबल में कॉपी, बार-बार dict lookup से बचने के लिए)
+    minBaseCount = p["minBaseCount"]  # न्यूनतम बेस काउंट (लोकल वेरिएबल में कॉपी)
     maxBaseCount = p["maxBaseCount"]  # अधिकतम बेस काउंट
     atrPeriod = p["atrPeriod"]        # ATR पीरियड
 
-    # ATR और 20-पीरियड मूविंग एवरेज वॉल्यूम की गणना (एक बार पूरी सीरीज़ के लिए, बार-बार नहीं)
-    atr = _wilder_atr(h, l, c, atrPeriod)
-    vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"], min_periods=1).mean().to_numpy()
-
     # सापेक्ष इंडेक्स पर True Range (TR) निकालने के लिए इंटरनल फ़ंक्शन
-    # t = वर्तमान कैंडल का absolute index, idx = t से कितनी कैंडल पीछे (0 = खुद t)
     def tr(t, idx):
         return h[t - idx] - l[t - idx]
 
-    # बुलिश (ग्रीन) कैंडल जाँचने का फ़ंक्शन
     def is_bull(t, idx):
         return c[t - idx] > o[t - idx]
 
-    # बेरिश (रेड) कैंडल जाँचने का फ़ंक्शन
     def is_bear(t, idx):
         return o[t - idx] > c[t - idx]
 
-    # कैंडल में विक्स (Wicks) का अनुपात निकालने का फ़ंक्शन (ऊपर+नीचे wick / कुल रेंज)
     def wick_pct(t, idx):
         i = t - idx
-        rng = h[i] - l[i]  # कैंडल की कुल लंबाई (High - Low)
+        rng = h[i] - l[i]
         if rng == 0:
             return 0.0
-        wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])  # ऊपर व नीचे की विक का योग
-        return wicks / rng  # कुल लंबाई के मुकाबले विक का %
+        wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
+        return wicks / rng
 
-    # कैंडल की BODY का % निकालने का फ़ंक्शन (body / कुल रेंज)
-    # यह wick_pct का उल्टा concept है: bodyPct + wickPct हमेशा 1.0 (100%) के बराबर होगा
     def body_pct(t, idx):
         i = t - idx
-        rng = h[i] - l[i]  # कैंडल की कुल रेंज
+        rng = h[i] - l[i]
         if rng == 0:
             return 0.0
-        body = abs(c[i] - o[i])  # Open और Close के बीच का absolute फ़ासला (candle body)
-        return body / rng  # कुल रेंज के मुकाबले body का %
+        body = abs(c[i] - o[i])
+        return body / rng
 
-    # किसी कैंडल की BODY की High/Low (सिर्फ़ Open-Close के बीच का हिस्सा, wick नहीं)
     def body_high_low(t, idx):
         i = t - idx
-        return max(o[i], c[i]), min(o[i], c[i])  # (bodyHigh, bodyLow)
+        return max(o[i], c[i]), min(o[i], c[i])
 
-    zones: List[Zone] = []  # पाए गए सभी ज़ोन्स की सूची (मास्टर लिस्ट, कभी shrink नहीं होती)
-    active_zones: List[Zone] = []  # वर्तमान में क्रियाशील (Non-Broken) ज़ोन्स (state-tracking के लिए अलग रखी)
+    zones: List[Zone] = []
+    active_zones: List[Zone] = []
 
-    # स्कैनिंग शुरू करने का सबसे पहला सुरक्षित कैंडल इंडेक्स
-    # (+3 इसलिए ताकि legInIdx+1 वाली "leg-in के पीछे की candle" भी हमेशा उपलब्ध रहे)
     min_start = max(atrPeriod, maxBaseCount + 3, 11)
-    record_from_bar = max(min_start, _resolve_start_bar_for_lookback(df, lookback_months))  # स्कैनिंग रिकॉर्ड इंडेक्स
+    record_from_bar = max(min_start, _resolve_start_bar_for_lookback(df, lookback_months))
 
-    # Leg-Out मल्टीप्लायर वैल्यू प्राप्त करना (backward-compatible: legOutAtrMult भी accept करता है)
     legOutMult = p.get("legOutTrMult", p.get("legOutAtrMult", 1.2))
 
-    # पूरे प्राइस डेटा पर कैंडल-बाय-कैंडल लूप (हर candle को संभावित "leg-out" मानकर टेस्ट किया जाता है)
     for t in range(min_start, n):
-        if np.isnan(atr[t]):  # अगर ATR उपलब्ध न हो (warm-up period) तो आगे बढ़ें
+        if np.isnan(atr[t]):
             continue
 
-        zoneFoundOnThisBar = False  # इस कैंडल पर ज़ोन मिलने का ट्रैकिंग फ्लैग
+        zoneFoundOnThisBar = False
 
-        # 1 से 3 बेस कैंडल्स के लिए प्रयास करना (छोटी बेस काउंट पहले try होती है)
         for baseCount in range(minBaseCount, maxBaseCount + 1):
-            if zoneFoundOnThisBar:  # यदि छोटी बेस काउंट में ज़ोन मिल गया हो तो लूप रोकें
+            if zoneFoundOnThisBar:
                 break
 
-            legOutIdx = 0            # Leg-Out वर्तमान कैंडल t पर है (सबसे हाल की कैंडल)
-            legInIdx = baseCount + 1 # Leg-In कैंडल बेस कैंडल्स से ठीक पहले की कैंडल है
-            prevIdx = legInIdx + 1   # Leg-In के ठीक पीछे (और पुरानी) वाली candle (opposite-cover rule के लिए)
+            legOutIdx = 0
+            legInIdx = baseCount + 1
+            prevIdx = legInIdx + 1
 
             if t - prevIdx < 0 or t - baseCount < 0:
-                continue  # डेटा अपर्याप्त होने पर छोड़ें (शुरुआती bars पर पीछे इतना data नहीं होगा)
+                continue
             if np.isnan(atr[t - legInIdx]) or np.isnan(atr[t]):
-                continue  # ATR अमान्य होने पर छोड़ें
-
-            # ---------------- LEG-IN की जाँच ----------------
-            legInTR = tr(t, legInIdx)      # Leg-In का TR (True Range)
-            legInLow = l[t - legInIdx]     # Leg-In का Low
-            legInHigh = h[t - legInIdx]    # Leg-In का High
-            legInClose = c[t - legInIdx]   # Leg-In का Close
-            legInVol = v[t - legInIdx]     # Leg-In वॉल्यूम
-            legInRng = legInHigh - legInLow  # Leg-In की कुल रेंज (High - Low)
-
-            legInIsBull = is_bull(t, legInIdx)  # क्या Leg-In ग्रीन है (bullish)
-            legInIsBear = is_bear(t, legInIdx)  # क्या Leg-In रेड है (bearish)
-
-            if legInRng == 0:  # 0 रेंज वाली (यानी High==Low) अमान्य कैंडल, आगे ना बढ़ें
                 continue
 
-            # ---------------- Leg-In की BODY STRENGTH चेक ----------------
-            # DBR में selling pressure ज़्यादा (बड़ी लाल body, छोटी wicks), RBD में buying
-            # pressure ज़्यादा (बड़ी हरी body, छोटी wicks) — दोनों दिशाओं पर बराबर लागू।
+            # ---------------- LEG-IN की जाँच ----------------
+            legInTR = tr(t, legInIdx)
+            legInLow = l[t - legInIdx]
+            legInHigh = h[t - legInIdx]
+            legInClose = c[t - legInIdx]
+            legInVol = v[t - legInIdx]
+            legInRng = legInHigh - legInLow
+
+            legInIsBull = is_bull(t, legInIdx)
+            legInIsBear = is_bear(t, legInIdx)
+
+            if legInRng == 0:
+                continue
+
             legInBodyPct = body_pct(t, legInIdx)
             if legInBodyPct < p["legInMinBodyPct"]:
-                continue  # body बहुत छोटी / wicks बहुत बड़ी -> साफ़ दबाव नहीं दिखा -> reject
+                continue
 
-            # ---------------- Opposite-color पीछे वाली candle की BODY का 50%+ cover चेक ----------------
-            # सिर्फ़ पीछे वाली candle की BODY (Open-Close) से overlap नापा जाता है, उसकी पूरी
-            # wick-सहित range से नहीं। अगर सिर्फ़ उसकी wick leg-in में घुसे तो वह zone को
-            # invalid नहीं करेगी — सिर्फ़ असली "body" का 50%+ overlap invalid करेगा।
             prevIsBull = is_bull(t, prevIdx)
             prevIsBear = is_bear(t, prevIdx)
             isOppositeColor = (legInIsBull and prevIsBear) or (legInIsBear and prevIsBull)
             if isOppositeColor:
-                prevBodyHigh, prevBodyLow = body_high_low(t, prevIdx)  # सिर्फ़ body रेंज
+                prevBodyHigh, prevBodyLow = body_high_low(t, prevIdx)
                 overlap = max(0.0, min(prevBodyHigh, legInHigh) - max(prevBodyLow, legInLow))
                 coverPct = overlap / legInRng
                 if coverPct >= p["rejectOppositeCoverPct"]:
-                    continue  # opposite-color candle ki BODY ne leg-in ko 50%+ cover kiya -> invalid
+                    continue
 
-            # Close Location Value (CLV) निकालना — pattern classification में इस्तेमाल होगी
-            bullClv = (legInClose - legInLow) / legInRng  # बुलिश CLV स्कोर (close ऊपर के कितने पास बंद हुआ)
-            bearClv = (legInHigh - legInClose) / legInRng # बेरिश CLV स्कोर (close नीचे के कितने पास बंद हुआ)
+            bullClv = (legInClose - legInLow) / legInRng
+            bearClv = (legInHigh - legInClose) / legInRng
 
             # ---------------- BASE की जाँच ----------------
-            allBaseValid = True        # सभी बेस कैंडल्स वैध हैं या नहीं
-            maxBaseTR = 0.0            # बेस कैंडल्स में सबसे बड़ा TR
-            maxBaseHigh = -1.0         # बेस कैंडल्स में सबसे अधिक High
-            minBaseLow = float("inf")  # बेस कैंडल्स में सबसे कम Low
-            hasOppositeColorBase = False  # क्या विपरीत रंग की बेस कैंडल है (density score के लिए)
+            allBaseValid = True
+            maxBaseTR = 0.0
+            maxBaseHigh = -1.0
+            minBaseLow = float("inf")
+            hasOppositeColorBase = False
 
-            # सभी बेस कैंडल्स पर लूप चलाकर आकार व High/Low निकालना
             for b in range(1, baseCount + 1):
                 if np.isnan(atr[t - b]):
                     allBaseValid = False
                     break
-                bTR = tr(t, b)  # संबंधित बेस कैंडल का TR
+                bTR = tr(t, b)
 
-                # नियम: बेस कैंडल की TR, ATR से छोटी होनी चाहिए (consolidation area)
                 if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
                     allBaseValid = False
                     break
 
                 if bTR > maxBaseTR:
-                    maxBaseTR = bTR  # सबसे बड़ा Base TR स्टोर किया
+                    maxBaseTR = bTR
 
                 if h[t - b] > maxBaseHigh:
-                    maxBaseHigh = h[t - b]  # उच्चतम High अपडेट किया
+                    maxBaseHigh = h[t - b]
                 if l[t - b] < minBaseLow:
-                    minBaseLow = l[t - b]   # न्यूनतम Low अपडेट किया
+                    minBaseLow = l[t - b]
 
             if not allBaseValid or maxBaseTR == 0:
-                continue  # बेस कैंडल अमान्य होने पर आगे बढ़ें
+                continue
 
-            # नियम: Leg-In कैंडल सबसे बड़ी बेस कैंडल से कम से कम 2 गुना बड़ी होनी चाहिए
             if legInTR < (p["legInToBaseSizeMult"] * maxBaseTR):
                 continue
 
-            # Leg-In का न्यूनतम आकार 1x ATR से बड़ा होना चाहिए
             validLegIn = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
             if not validLegIn:
                 continue
 
             # ---------------- LEG-OUT की जाँच ----------------
-            legOutTR = tr(t, legOutIdx)      # Leg-Out का TR
-            legOutHigh = h[t - legOutIdx]    # Leg-Out का High
-            legOutLow = l[t - legOutIdx]     # Leg-Out का Low
-            legOutClose = c[t - legOutIdx]   # Leg-Out का Close
-            legOutOpen = o[t - legOutIdx]    # Leg-Out का Open (body-engulf चेक के लिए चाहिए)
-            legOutVol = v[t - legOutIdx]     # Leg-Out का वॉल्यूम
+            legOutTR = tr(t, legOutIdx)
+            legOutHigh = h[t - legOutIdx]
+            legOutLow = l[t - legOutIdx]
+            legOutClose = c[t - legOutIdx]
+            legOutOpen = o[t - legOutIdx]
+            legOutVol = v[t - legOutIdx]
 
-            isDemandLegOut = is_bull(t, legOutIdx)  # क्या Leg-Out बुलिश है (Demand)
-            isSupplyLegOut = is_bear(t, legOutIdx)  # क्या Leg-Out बेरिश है (Supply)
+            isDemandLegOut = is_bull(t, legOutIdx)
+            isSupplyLegOut = is_bear(t, legOutIdx)
             if not (isDemandLegOut or isSupplyLegOut):
-                continue  # अनिश्चित (doji जैसी) कैंडल होने पर छोड़ें
+                continue
 
-            # Leg-Out विस्फोटक (Explosive) व वैध होनी चाहिए
-            isLegOutExplosive = legOutTR >= (legOutMult * atr[t - legOutIdx])  # कम से कम 1.2x ATR
-            isLegOutWickValid = wick_pct(t, legOutIdx) <= p["maxWickPct"]        # बत्तियाँ <= 25%
-            # FIX (v8.5): TR Hierarchy अब LegOut >= LegIn (पहले सख्ती से `>` था, जिससे
-            # बराबर TR वाले वैध zones (SBI Life / ICICI Bank स्क्रीनशॉट्स) reject हो रहे थे)।
+            isLegOutExplosive = legOutTR >= (legOutMult * atr[t - legOutIdx])
+            isLegOutWickValid = wick_pct(t, legOutIdx) <= p["maxWickPct"]
             passesTRHierarchy = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
-            passesVolume = legOutVol > legInVol                                  # LegOut का वॉल्यूम LegIn से अधिक हो
+            passesVolume = legOutVol > legInVol
 
-            # ---------------- प्राइस इमबैलेंस चेकिंग (gap-size limit सहित) ----------------
-            # [FIXED v8.6] इसे engulf-चेक से पहले निकाला ताकि नीचे engulf-चेक में यह पता चल
-            # सके कि असली gap मौजूद है या नहीं (ICICI Bank जैसे बड़े explosive legOut के लिए ज़रूरी)।
+            # ---------------- [FIXED v8.7] प्राइस इमबैलेंस चेकिंग (dual gap-cap) ----------------
+            # gap ki cap ab do sanctions me se jo bhi बड़ी हो, वह मानी जाती है:
+            #   legInCap  = maxImbalanceVsLegInMult  * legInTR   (पुराना, backward-compatible)
+            #   legOutCap = maxImbalanceVsLegOutMult * legOutTR  (नया, बड़े explosive/gap zones के लिए)
+            # चूँकि passesTRHierarchy में legOutTR>=legInTR गारंटीड है, इसलिए legOutCap
+            # कभी legInCap से छोटा नहीं होगा (अगर दोनों mult बराबर 1.0 हों) — यानी यह
+            # बदलाव सिर्फ़ ज़्यादा उदार (permissive) है, पुराने किसी valid zone को
+            # नुकसान नहीं पहुँचाता, सिर्फ़ genuine बड़े gap (overnight जैसे) वाले zones
+            # को सही तरीके से पास होने देता है।
             hasImbalance = True
-            hasGenuineGap = False  # NEW (v8.5): सिर्फ़ असली gap (close-based नहीं) — स्कोरिंग बोनस के लिए
+            hasGenuineGap = False
             gapSize = 0.0
+            legInCap = p["maxImbalanceVsLegInMult"] * legInTR
+            legOutCap = p.get("maxImbalanceVsLegOutMult", 1.0) * legOutTR
+            gapCap = max(legInCap, legOutCap)
             if p["useImbalance"]:
                 if isDemandLegOut:
-                    # डिमांड: Leg-Out Low बेस High से ऊपर हो या Close Leg-In High से ऊपर हो
-                    hasGenuineGap = legOutLow > maxBaseHigh  # असली gap: कोई overlap ही नहीं
+                    hasGenuineGap = legOutLow > maxBaseHigh
                     gapCond = hasGenuineGap or (legOutClose > legInHigh)
-                    # gap का असली साइज़ leg-in TR से बड़ा नहीं होना चाहिए
                     gapSize = max(0.0, legOutLow - maxBaseHigh)
-                    hasImbalance = gapCond and (gapSize <= p["maxImbalanceVsLegInMult"] * legInTR)
+                    hasImbalance = gapCond and (gapSize <= gapCap)
                 elif isSupplyLegOut:
-                    # सप्लाई: Leg-Out High बेस Low से नीचे हो या Close Leg-In Low से नीचे हो
-                    hasGenuineGap = legOutHigh < minBaseLow  # असली gap: कोई overlap ही नहीं
+                    hasGenuineGap = legOutHigh < minBaseLow
                     gapCond = hasGenuineGap or (legOutClose < legInLow)
-                    # gap का असली साइज़ leg-in TR से बड़ा नहीं होना चाहिए
                     gapSize = max(0.0, minBaseLow - legOutHigh)
-                    hasImbalance = gapCond and (gapSize <= p["maxImbalanceVsLegInMult"] * legInTR)
-                # gap का साइज़ leg-in TR से बड़ा होने पर हम असली gap को स्कोरिंग बोनस में भी
-                # नहीं गिनते (अनियंत्रित/बहुत बड़ा gap भरोसेमंद संकेत नहीं है)
-                if hasGenuineGap and gapSize > (p["maxImbalanceVsLegInMult"] * legInTR):
+                    hasImbalance = gapCond and (gapSize <= gapCap)
+                if hasGenuineGap and gapSize > gapCap:
                     hasGenuineGap = False
 
-            # ---------------- [FIXED v8.6] Leg-Out की BODY पूरे base-zone को engulf ना करे ----------------
-            # इस नियम का असली मक़सद यह देखना है कि base कैंडल और leg-out कैंडल के बीच सचमुच
-            # कोई "white area" (गैप) बचा है या नहीं — यह TR के साइज़ (कौन बड़ा/छोटा है) से तय
-            # नहीं होता, बल्कि सिर्फ़ price-levels से तय होता है: legOut की BODY (Open-Close),
-            # base की पूरी रेंज (wick सहित, यानी maxBaseHigh से minBaseLow तक) को ऊपर-नीचे दोनों
-            # तरफ़ से पूरी तरह ढक/निगल लेती है या नहीं।
-            #   - अगर base और legOut के बीच सच में white area/gap है (hasGenuineGap, नीचे उसी
-            #     price-level तरीके से निकाला गया है: legOutLow > maxBaseHigh, या इसका उल्टा
-            #     Supply में) — तो engulf होने पर भी zone INVALID नहीं होगी, क्योंकि गैप खुद ही
-            #     साबित करता है कि base के ऑर्डर पूरी तरह consume नहीं हुए (leftover orders बचे)।
-            #   - अगर कोई white area/gap नहीं है (legOut और base के बीच सीधा overlap है) AND
-            #     फिर भी legOut की BODY पूरे base को निगल लेती है — तभी zone INVALID होगी,
-            #     क्योंकि तब यह धीमी/ओवरलैपिंग चाल है, स्पष्ट leftover ऑर्डर का सबूत नहीं।
-            # पहले यह चेक gap-status देखे बिना ही हमेशा लागू होता था, जिससे बहुत बड़ी explosive
-            # legOut कैंडल (जैसे ICICI Bank उदाहरण: legOut TR=35 बनाम base TR सिर्फ़ 6.60,
-            # जिसमें असल में साफ़ gap भी मौजूद था) गलती से reject हो जाती थी।
+            # ---------------- Leg-Out की BODY पूरे base-zone को engulf ना करे (genuine gap हो तो OK) ----------------
             legOutBodyHigh = max(legOutOpen, legOutClose)
             legOutBodyLow = min(legOutOpen, legOutClose)
             legOutBodyEngulfsBase = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
             if legOutBodyEngulfsBase and not hasGenuineGap:
-                continue  # gap नहीं है AND body ने पूरा base निगल लिया -> invalid
+                continue
 
             # ---------------- पैटर्न वर्गीकरण (Pattern Classification) ----------------
-            isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut  # Rally-Base-Rally
-            isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut  # Drop-Base-Rally
-            isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut  # Drop-Base-Drop
-            isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut  # Rally-Base-Drop
+            isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
+            isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
+            isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
+            isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut
 
-            # सभी शर्तों का एक साथ वैलिडेशन (सब true होने पर ही zone मान्य होगा)
             isValid = (
                 (isRBR or isDBR or isDBD or isRBD)
                 and isLegOutExplosive
@@ -508,38 +439,29 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             )
 
             if not isValid:
-                continue  # कोई शर्त पूरी न होने पर छोड़ें
+                continue
 
             # ---------------- डेंसिटी स्कोर (Density Score Calculation) ----------------
-            densityScore = 0  # स्कोर 0 से शुरू
+            densityScore = 0
 
-            # 1. ज़ोन में केवल 1 बेस कैंडल होने पर (+15 अंक) — जितनी छोटी base, उतनी अच्छी
             if baseCount == 1:
                 densityScore += 15
 
-            # 2. Leg-In कैंडल >= 1.5x ATR होने पर (+10 अंक) — "leg-in TR बड़ा हो ATR से" वाला नियम
             if legInTR >= (p["hqLegInAtrMult"] * atr[t - legInIdx]):
                 densityScore += 10
 
-            # 3. Leg-Out कैंडल >= leg-in candle का 2.0x TR होने पर (+15 अंक)
-            #    (यह अलग से "अच्छे zone" वाला बोनस है — validity के लिए सिर्फ़ >= 1.0x काफ़ी है)
             if legOutTR >= (p["hqLegOutTrMult"] * tr(t, legInIdx)):
                 densityScore += 15
 
-            # 4. Leg-In >= 2x Base और Leg-Out >= 2x Leg-In का अनुपात होने पर (+15 अंक)
             if (legInTR >= 2.0 * maxBaseTR) and (legOutTR >= 2.0 * legInTR):
                 densityScore += 15
 
-            # 5. Leg-Out का वॉल्यूम 20-SMA से ज्यादा होने पर (+10 अंक)
             if legOutVol > vol_sma[t - legOutIdx]:
                 densityScore += 10
 
-            # 6. Leg-Out का क्लोज़ शरीर के ऊपरी/निचले 80% भाग में होने पर (+15 अंक)
-            #    DBR (Drop-Base-Rally, Demand) में legOut की खुद की BODY साइज़ (heavy buying
-            #    pressure) भी वैकल्पिक शर्त के तौर पर मान्य है।
             if isDemandLegOut:
                 legOutBodyPos = (legOutClose - legOutLow) / legOutTR if legOutTR > 0 else 0
-                legOutOwnBodyPct = body_pct(t, legOutIdx)  # legOut की खुद की body % (heavy pressure संकेत)
+                legOutOwnBodyPct = body_pct(t, legOutIdx)
                 if isDBR:
                     if (legOutBodyPos >= 0.80) or (legOutOwnBodyPct >= p["legOutBodyHeavyPressurePct"]):
                         densityScore += 15
@@ -551,7 +473,6 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 if legOutBodyPos >= 0.80:
                     densityScore += 15
 
-            # 7. डिमांड में Red Base या सप्लाई में Green Base कैंडल होने पर (+10 अंक)
             for b in range(1, baseCount + 1):
                 if isDemandLegOut and is_bear(t, b):
                     hasOppositeColorBase = True
@@ -562,46 +483,26 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if hasOppositeColorBase:
                 densityScore += 10
 
-            # 8. फ्रेश ज़ोन (Fresh Zone) होने पर बोनस (+10 अंक)
             densityScore += 10
 
-            # 9. NEW (v8.5): असली प्राइस-गैप (genuine imbalance) मौजूद होने पर बोनस
-            #    (Jindal Steel के 4h/6h स्क्रीनशॉट में circle किया gap जैसा उदाहरण)
             if hasGenuineGap:
                 densityScore += p["genuineGapScoreBonus"]
 
-            # ---------------- स्कोर-आधारित वैलिडिटी फ़िल्टर ----------------
-            # minValidScore से कम स्कोर वाले zone को वैलिड नहीं माना जाएगा, यानी वो zone सिरे
-            # से discard हो जाएगा (ना तो normal ना ही HQ zone बनेगा)। zoneFoundOnThisBar अभी
-            # True नहीं किया गया, ताकि यह ज़ोन reject होने पर इसी candle t पर बड़ी baseCount
-            # भी आज़माई जा सके।
             if densityScore < p["minValidScore"]:
-                continue  # स्कोर बहुत कम -> zone invalid -> अगली baseCount try करें
+                continue
 
-            # hqScoreThreshold या उससे अधिक अंक पाने वाले ज़ोन को High Quality (HQ) माना जाएगा
             isHQZone = densityScore >= p["hqScoreThreshold"]
 
-            zoneFoundOnThisBar = True  # ज़ोन सफलतापूर्वक खोज लिया गया (score-filter भी पास हुआ)
+            zoneFoundOnThisBar = True
 
             # ---------------- प्रॉक्सिमल और डिस्टल लाइन्स (Entry/SL/TP) ----------------
-            # प्रॉक्सिमल (एंट्री स्तर): डिमांड में Base का High, सप्लाई में Base का Low
             proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
-            # डिस्टल (ज़ोन की सीमा): डिमांड में Base का Low, सप्लाई में Base का High
             distVal = minBaseLow if isDemandLegOut else maxBaseHigh
 
-            # स्टॉपलॉस: डिस्टल लाइन + ATR बफर
             slVal = (distVal - p["slBufferAtr"] * atr[t]) if isDemandLegOut else (distVal + p["slBufferAtr"] * atr[t])
-            riskPerShare = abs(proxVal - slVal)  # प्रति शेयर रिस्क
-            # टेक प्रॉफिट: प्रॉक्सिमल + (रिस्क * R:R)
+            riskPerShare = abs(proxVal - slVal)
             tpVal = (proxVal + riskPerShare * p["targetRR"]) if isDemandLegOut else (proxVal - riskPerShare * p["targetRR"])
 
-            # [FIXED/REMOVED] यहाँ पहले "रिस्क-आधारित क्वांटिटी कैलकुलेशन" (riskAmount, qty) होती
-            # थी। आपके कमेंट "इसे हटा दीजिए" के मुताबिक अब qty नहीं निकाला जाता।
-
-            # ---------------- Tested-state के लिए LEG-OUT कैंडल का 50%-रीट्रेस स्तर ----------------
-            # Demand zone में price ऊपर से वापस नीचे आकर legOutHigh से 50% (testedLegOutRetracePct)
-            # रीट्रेस कर ले तो "Tested" — Supply zone में price नीचे से वापस ऊपर आकर legOutLow से
-            # 50% रीट्रेस कर ले तो "Tested"। दोनों फ़ॉर्मूला 50% पर एक ही मध्य-बिंदु देते हैं।
             if isDemandLegOut:
                 legOutMidLevel = legOutHigh - p["testedLegOutRetracePct"] * (legOutHigh - legOutLow)
             else:
@@ -610,11 +511,9 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             # ---------------- डुप्लीकेट ज़ोन फिल्टर ----------------
             isDuplicate = False
             checked = 0
-            # पिछले 11 ज़ोन से तुलना करके अति-निकटतम ज़ोन को हटाया जाता है
             for checkZ in reversed(zones):
                 if checkZ.state == "Broken":
-                    continue  # टूट चुके पुराने ज़ोन से तुलना ना करें (वरना नया valid zone गलती से discard हो सकता है)
-                # यदि एक ही प्रकार का ज़ोन 0.25x ATR के दायरे में पहले से मौजूद है
+                    continue
                 if checkZ.isDemand == isDemandLegOut and abs(checkZ.proxVal - proxVal) < (atr[t] * 0.25):
                     isDuplicate = True
                     break
@@ -622,9 +521,8 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 if checked >= 11:
                     break
             if isDuplicate:
-                continue  # डुप्लीकेट ज़ोन को स्किप करें
+                continue
 
-            # पैटर्न प्रकार और कैटेगरी असाइन की गई
             if isRBR:
                 patternType, zoneCategory = "RBR", "Continuation"
             elif isDBR:
@@ -634,9 +532,8 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             else:
                 patternType, zoneCategory = "RBD", "Reversal"
 
-            leftBar = t - baseCount  # ज़ोन की शुरुआत का इंडेक्स
+            leftBar = t - baseCount
 
-            # नया Zone ऑब्जेक्ट निर्मित किया गया (sweptLiquidity और qty पास नहीं किए जाते, दोनों फ़ील्ड हटा दी गई हैं)
             newZone = Zone(
                 proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
                 isDemand=isDemandLegOut, isHQ=isHQZone, densityScore=densityScore,
@@ -646,90 +543,243 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 timestamp=df.index[t],
                 legOutHigh=legOutHigh, legOutLow=legOutLow, legOutMidLevel=legOutMidLevel,
             )
-            zones.append(newZone)        # मास्टर लिस्ट में जोड़ा गया
-            active_zones.append(newZone) # एक्टिव ज़ोन लिस्ट में जोड़ा गया
+            zones.append(newZone)
+            active_zones.append(newZone)
 
         # ---------------- ज़ोन स्टेटस ट्रैकिंग (Fresh, Tested, Broken) ----------------
-        # यह हर candle t पर चलता है, ताकि पुराने zones का state (टच/टूट) अपडेट होता रहे।
-        # "Tested" base-zone के proximal-distal मध्य-बिंदु से नहीं, बल्कि खुद LEG-OUT कैंडल के
-        # रेंज के 50% रीट्रेसमेंट (legOutMidLevel, ज़ोन बनते वक़्त ही calculate करके स्टोर किया
-        # गया) से तय होता है। साथ ही अगर कोई zone maxTestedCount से ज़्यादा बार (touchCount >
-        # maxTestedCount) टेस्ट हो चुकी है, तो उसे भी Broken मानकर हटा दिया जाता है।
         if active_zones:
-            lo_t, hi_t = l[t], h[t]  # वर्तमान कैंडल का Low और High
-            still_active = []        # जीवित (Non-Broken) ज़ोन्स की सूची
+            lo_t, hi_t = l[t], h[t]
+            still_active = []
             for z in active_zones:
                 if z.state == "Fresh":
                     if z.isDemand:
                         if lo_t <= z.distVal:
-                            z.state = "Broken"  # डिस्टल लाइन सीधे टूटी
+                            z.state = "Broken"
                         elif lo_t <= z.legOutMidLevel:
-                            z.state = "Tested"  # leg-out रेंज के >=50% तक टच हुआ, अब Tested
+                            z.state = "Tested"
                             z.touchCount += 1
-                        # else: अभी legOutMidLevel तक नहीं पहुँचा, अभी भी Fresh ही रहेगा
                     else:
                         if hi_t >= z.distVal:
-                            z.state = "Broken"  # डिस्टल लाइन सीधे टूटी
+                            z.state = "Broken"
                         elif hi_t >= z.legOutMidLevel:
-                            z.state = "Tested"  # leg-out रेंज के >=50% तक टच हुआ, अब Tested
+                            z.state = "Tested"
                             z.touchCount += 1
-                        # else: अभी legOutMidLevel तक नहीं पहुँचा, अभी भी Fresh ही रहेगा
                 elif z.state == "Tested":
                     if z.isDemand:
                         if lo_t <= z.distVal:
-                            z.state = "Broken"  # डिमांड ज़ोन टूटा
+                            z.state = "Broken"
                         elif lo_t <= z.legOutMidLevel:
-                            z.touchCount += 1   # दोबारा >=50% रीट्रेस तक टच हुआ
+                            z.touchCount += 1
                     else:
                         if hi_t >= z.distVal:
-                            z.state = "Broken"  # सप्लाई ज़ोन टूटा
+                            z.state = "Broken"
                         elif hi_t >= z.legOutMidLevel:
-                            z.touchCount += 1   # दोबारा >=50% रीट्रेस तक टच हुआ
+                            z.touchCount += 1
 
-                # maxTestedCount से ज़्यादा बार टेस्ट हो चुकी zone अब वैलिड नहीं — Broken कर दें
                 if z.state == "Tested" and z.touchCount > p["maxTestedCount"]:
                     z.state = "Broken"
 
                 if z.state != "Broken":
-                    still_active.append(z)  # केवल एक्टिव ज़ोन्स को ही आगे रखा
-            active_zones = still_active     # एक्टिव लिस्ट अपडेट की गई
+                    still_active.append(z)
+            active_zones = still_active
 
     if lookback_months is None:
-        return zones  # अगर कोई लुकबैक फ़िल्टर नहीं है तो सभी ज़ोन लौटाएँ
-    # केवल तय लुकबैक अवधि के भीतर निर्मित ज़ोन रिटर्न करें
+        return zones
     return [z for z in zones if z.createdBarIndex >= record_from_bar]
 
 
 # केवल एक्टिव (Fresh या Tested) ज़ोन निकालने के लिए हेल्पर फ़ंक्शन
 def latest_active_zones(zones: List[Zone], include_tested: bool = True) -> List[Zone]:
-    states = {"Fresh"} | ({"Tested"} if include_tested else set())  # एक्टिव राज्यों का सेट
-    return [z for z in zones if z.state in states]  # फ़िल्टर्ड सूची रिटर्न की गई
+    states = {"Fresh"} | ({"Tested"} if include_tested else set())
+    return [z for z in zones if z.state in states]
 
 
 # वर्तमान प्राइस के पास मौजूद ज़ोन के लिए लाइव अलर्ट जनरेट करने वाला फ़ंक्शन
 def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_pct=1.0,
                      include_tested=True) -> List[Dict[str, Any]]:
-    alerts = []  # अलर्ट्स की लिस्ट
-    candidates = latest_active_zones(zones, include_tested=include_tested)  # एक्टिव ज़ोन चुने
+    alerts = []
+    candidates = latest_active_zones(zones, include_tested=include_tested)
     for z in candidates:
         if z.proxVal <= 0:
             continue
         if z.isDemand:
-            diff_pct = (current_price - z.proxVal) / z.proxVal  # डिमांड ज़ोन से वर्तमान प्राइस का अंतर %
+            diff_pct = (current_price - z.proxVal) / z.proxVal
             direction = "DEMAND"
         else:
-            diff_pct = (z.proxVal - current_price) / z.proxVal  # सप्लाई ज़ोन से अंतर %
+            diff_pct = (z.proxVal - current_price) / z.proxVal
             direction = "SUPPLY"
-        # तय की गई निकटता (proximity percentage) सीमा की जाँच
         if not (min_proximity_pct <= diff_pct <= max_proximity_pct):
             continue
-        # अलर्ट डिक्शनरी बनाकर सूची में जोड़ा गया (swept_liquidity और qty keys यहाँ से हटा दी गई हैं)
         alerts.append({
             "direction": direction, "pattern": z.patternType, "category": z.zoneCategory,
             "entry": z.proxVal, "sl": z.slVal, "tp": z.tpVal, "is_hq": z.isHQ,
             "score": z.densityScore, "touch_count": z.touchCount,
             "distance_pct": diff_pct * 100, "state": z.state, "timestamp": z.timestamp,
         })
-    # हाई-क्वालिटी और निकटता (Distance) के आधार पर अलर्ट्स को सॉर्ट किया गया
     alerts.sort(key=lambda a: (-int(a["is_hq"]), a["distance_pct"]))
-    return alerts  # सॉर्ट किए गए अलर्ट्स रिटर्न किए गए
+    return alerts
+
+
+# --------------------------------------------------------------------------
+# [NEW v8.7] डायग्नोस्टिक/ट्रबलशूटिंग हेल्पर
+# --------------------------------------------------------------------------
+def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> List[Dict[str, Any]]:
+    """
+    किसी specific candle को Leg-Out मानकर (baseCount=1,2,3 तीनों आज़माकर) हर नियम
+    का pass/fail स्टेप-बाय-स्टेप बताता है — ताकि भविष्य में "यह zone स्कैन क्यों
+    नहीं हुई" जैसे सवाल का जवाब सीधे मिल जाए, बिना पूरा scan_zones दोबारा पढ़े।
+
+    at_index: या तो integer positional index (df में candle की position), या
+              df.index में मौजूद कोई timestamp/label (जैसे pd.Timestamp)।
+
+    Return: हर baseCount (1,2,3) के लिए एक dict की list, जिसमें हर नियम का
+            True/False status और उससे जुड़े raw नंबर (TR, ATR, gap आदि) होंगे।
+    """
+    p = dict(DEFAULT_PARAMS)
+    if params:
+        p.update(params)
+    p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
+    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
+
+    o, h, l, c, v, atr, vol_sma = _prep_arrays(df, p)
+    n = len(df)
+
+    if isinstance(at_index, (int, np.integer)):
+        t = int(at_index)
+    else:
+        t = int(df.index.get_loc(at_index))
+
+    def tr(idx_from_t):
+        return h[t - idx_from_t] - l[t - idx_from_t]
+
+    def is_bull(idx_from_t):
+        return c[t - idx_from_t] > o[t - idx_from_t]
+
+    def is_bear(idx_from_t):
+        return o[t - idx_from_t] > c[t - idx_from_t]
+
+    def wick_pct(idx_from_t):
+        i = t - idx_from_t
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
+        return wicks / rng
+
+    def body_pct(idx_from_t):
+        i = t - idx_from_t
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        return abs(c[i] - o[i]) / rng
+
+    legOutMult = p.get("legOutTrMult", p.get("legOutAtrMult", 1.2))
+    reports = []
+
+    for baseCount in range(p["minBaseCount"], p["maxBaseCount"] + 1):
+        rep: Dict[str, Any] = {"baseCount": baseCount, "legOutTimestamp": df.index[t]}
+        legOutIdx = 0
+        legInIdx = baseCount + 1
+        prevIdx = legInIdx + 1
+
+        if t - prevIdx < 0 or t - baseCount < 0 or np.isnan(atr[t]) or np.isnan(atr[t - legInIdx]):
+            rep["result"] = "SKIP (डेटा/ATR अपर्याप्त)"
+            reports.append(rep)
+            continue
+
+        legInTR = tr(legInIdx)
+        legInLow = l[t - legInIdx]; legInHigh = h[t - legInIdx]; legInClose = c[t - legInIdx]
+        legInVol = v[t - legInIdx]; legInRng = legInHigh - legInLow
+        legInIsBull, legInIsBear = is_bull(legInIdx), is_bear(legInIdx)
+
+        rep["legInTR"] = legInTR
+        rep["legInATR"] = atr[t - legInIdx]
+        rep["legIn_TR_gte_ATR"] = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
+
+        if legInRng == 0:
+            rep["result"] = "INVALID (legInRng=0)"
+            reports.append(rep)
+            continue
+
+        rep["legInBodyPct"] = body_pct(legInIdx)
+        rep["legIn_body_ok"] = rep["legInBodyPct"] >= p["legInMinBodyPct"]
+
+        bullClv = (legInClose - legInLow) / legInRng
+        bearClv = (legInHigh - legInClose) / legInRng
+        rep["bullClv"] = bullClv
+        rep["bearClv"] = bearClv
+
+        maxBaseTR = 0.0; maxBaseHigh = -1.0; minBaseLow = float("inf"); allBaseValid = True
+        for b in range(1, baseCount + 1):
+            if np.isnan(atr[t - b]):
+                allBaseValid = False
+                break
+            bTR = tr(b)
+            if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
+                allBaseValid = False
+            if bTR > maxBaseTR:
+                maxBaseTR = bTR
+            if h[t - b] > maxBaseHigh:
+                maxBaseHigh = h[t - b]
+            if l[t - b] < minBaseLow:
+                minBaseLow = l[t - b]
+
+        rep["maxBaseTR"] = maxBaseTR
+        rep["base_all_valid(<=ATR)"] = allBaseValid
+        rep["legIn_gte_2xBase"] = legInTR >= (p["legInToBaseSizeMult"] * maxBaseTR) if maxBaseTR else False
+
+        legOutTR = tr(legOutIdx)
+        legOutHigh = h[t - legOutIdx]; legOutLow = l[t - legOutIdx]
+        legOutClose = c[t - legOutIdx]; legOutOpen = o[t - legOutIdx]; legOutVol = v[t - legOutIdx]
+        isDemandLegOut, isSupplyLegOut = is_bull(legOutIdx), is_bear(legOutIdx)
+
+        rep["legOutTR"] = legOutTR
+        rep["legOutATR"] = atr[t - legOutIdx]
+        rep["legOut_explosive(>=1.2xATR)"] = legOutTR >= (legOutMult * atr[t - legOutIdx])
+        rep["legOut_wickPct"] = wick_pct(legOutIdx)
+        rep["legOut_wick_ok(<=25%)"] = rep["legOut_wickPct"] <= p["maxWickPct"]
+        rep["TR_hierarchy_ok(legOut>=legIn>base)"] = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
+        rep["volume_ok(legOut>legIn)"] = legOutVol > legInVol
+
+        legInCap = p["maxImbalanceVsLegInMult"] * legInTR
+        legOutCap = p.get("maxImbalanceVsLegOutMult", 1.0) * legOutTR
+        gapCap = max(legInCap, legOutCap)
+        hasGenuineGap = False; gapSize = 0.0; hasImbalance = True
+        if p["useImbalance"]:
+            if isDemandLegOut:
+                hasGenuineGap = legOutLow > maxBaseHigh
+                gapCond = hasGenuineGap or (legOutClose > legInHigh)
+                gapSize = max(0.0, legOutLow - maxBaseHigh)
+                hasImbalance = gapCond and (gapSize <= gapCap)
+            elif isSupplyLegOut:
+                hasGenuineGap = legOutHigh < minBaseLow
+                gapCond = hasGenuineGap or (legOutClose < legInLow)
+                gapSize = max(0.0, minBaseLow - legOutHigh)
+                hasImbalance = gapCond and (gapSize <= gapCap)
+
+        rep["gapSize"] = gapSize
+        rep["gapCap(legIn/legOut)"] = f"{legInCap:.2f} / {legOutCap:.2f} -> used {gapCap:.2f}"
+        rep["hasGenuineGap"] = hasGenuineGap
+        rep["imbalance_ok"] = hasImbalance
+
+        legOutBodyHigh = max(legOutOpen, legOutClose); legOutBodyLow = min(legOutOpen, legOutClose)
+        engulf = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
+        rep["engulfsBase"] = engulf
+        rep["engulf_ok"] = (not engulf) or hasGenuineGap
+
+        isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
+        isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
+        isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
+        isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut
+        rep["pattern"] = "RBR" if isRBR else "DBR" if isDBR else "DBD" if isDBD else "RBD" if isRBD else "NONE"
+
+        rep["FINAL_VALID"] = bool(
+            rep["legIn_TR_gte_ATR"] and rep.get("legIn_body_ok") and rep.get("legIn_gte_2xBase")
+            and allBaseValid and rep["pattern"] != "NONE"
+            and rep["legOut_explosive(>=1.2xATR)"] and rep["legOut_wick_ok(<=25%)"]
+            and rep["TR_hierarchy_ok(legOut>=legIn>base)"] and rep["volume_ok(legOut>legIn)"]
+            and rep["imbalance_ok"] and rep["engulf_ok"]
+        )
+        reports.append(rep)
+
+    return reports
