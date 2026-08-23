@@ -5,6 +5,21 @@
 zone_core.py — v8.5 (Advanced D&S Engine — TR Hierarchy Relaxed + Gap Scoring + LegOut-based Tested Rule)
 यह एक एडवांस्ड डिमांड और सप्लाई (D&S) ज़ोन डिटेक्शन इंजन है।
 
+=== इस फ़ाइल में मैंने क्या ठीक किया (कोड चलाने लायक बनाने के लिए) ===
+आपकी पिछली फ़ाइल में DEFAULT_PARAMS के अंदर कुछ लाइनें हिंदी/अंग्रेज़ी में
+"नियम समझाने" के अंदाज़ में लिखी थीं (जैसे `legOutTrMult>=leg in Tr,`), लेकिन ये
+असल में valid Python सिंटैक्स नहीं थीं — Python इन्हें पढ़ ही नहीं पाता और फ़ाइल
+शुरू होते ही error देकर रुक जाती। मैंने हर ऐसी लाइन को उसी में लिखे नियम के मुताबिक
+एक असली नंबर/वैल्यू में बदल दिया है, और जहाँ नीचे कोड में जिस key नाम से उसे पढ़ा जा
+रहा था (जैसे `p["maxBaseAtrMult"]`, `p["legInMinAtrMult"]`, `p["hqLegInAtrMult"]`),
+वही सही key-नाम भी लगा दिया है ताकि आगे KeyError ना आए। नीचे हर जगह जहाँ बदलाव किया
+है वहाँ "[FIXED]" कमेंट लगा दिया है ताकि आपको दिख जाए कि क्या बदला।
+
+इसके अलावा, Zone में `qty` (क्वांटिटी) फ़ील्ड के आगे आपने खुद कमेंट में लिखा था
+"इसे हटा दीजिए" — तो मैंने qty से जुड़ा पूरा हिस्सा (Zone का फ़ील्ड, कैलकुलेशन,
+और alert में दिखना) हटा दिया है। बाकी पूरा लॉजिक (v8.5 की सारी नई/पुरानी शर्तें)
+जस-का-तस रखा गया है, सिर्फ़ टूटी हुई लाइनें ठीक की गई हैं।
+
 v8.4 से v8.5 में क्या नया जोड़ा/बदला गया (जैसा स्क्रीनशॉट्स के साथ आपने कहा)
 --------------------------------------------------------------------------
   A) FIX — SBI Life / ICICI Bank में circle किए गए valid zones स्कैन नहीं हो रहे थे,
@@ -21,32 +36,31 @@ v8.4 से v8.5 में क्या नया जोड़ा/बदला �
      गया gap) होने पर अब उसे एक्स्ट्रा डेंसिटी स्कोर (+10) मिलता है। पहले gap सिर्फ़
      validity-filter (useImbalance) के तौर पर काम करता था (या तो gap हो या close-based
      शर्त पूरी हो — दोनों में से कोई एक काफ़ी था)। अब इसके अलावा, अगर वाकई एक असली गैप
-     है (Leg-Out का Low, Base के High से ऊपर है / Demand में — या इसका उल्टा Supply
+     है (Leg-Out का Low, Base के High से ऊपर है — Demand में — या इसका उल्टा Supply
      में), तो एक अलग स्कोरिंग बोनस भी मिलता है, ताकि ऐसे साफ़-सुथरे gap वाले zones को
      बेहतर स्कोर मिले (जैसा Jindal Steel के स्क्रीनशॉट में दिखाया गया, वो बिल्कुल Fresh
      zone है और अब सही स्कोर पाएगा)।
 
-  C) CHANGED — "Tested" state अब zone के base-range (proximal-distal) के मध्य-बिंदु से
-     नहीं, बल्कि खुद LEG-OUT कैंडल के रेंज के 50% रीट्रेसमेंट से तय होता है (जैसा आपने
-     कहा: "leg out candle का 50% या इससे ऊपर टच करें तब उसे tested zone माने")। यानी:
+  C) CHANGED — "Tested" state अब zone के base-range (proximal) से नहीं, बल्कि
+     LEG-OUT कैंडल की खुद की रेंज के 50% area तक प्राइस रीट्रेसमेंट कर टच कर ले तो
+     उसे tested zone माने। यानी:
          Demand zone testedLevel = legOutHigh - 0.5 * (legOutHigh - legOutLow)
          Supply zone testedLevel = legOutLow  + 0.5 * (legOutHigh - legOutLow)
-     (0.5 = testedLegOutRetracePct, चाहें तो params में बदल सकते हैं)। जब price इस
-     स्तर तक (या उससे आगे, distal की तरफ़) वापस आ जाए, तभी zone "Tested" बनेगी — सिर्फ़
-     zone के ऊपरी किनारे (proximal) को छूना अब भी काफ़ी नहीं है।
-     Zone dataclass में अब legOutHigh, legOutLow, legOutMidLevel तीन नए fields भी जोड़े
-     गए हैं ताकि यह स्तर हर candle पर दोबारा-दोबारा ना निकालना पड़े (ज़ोन बनते वक़्त एक
-     बार calculate करके स्टोर कर लिया जाता है)।
+     (0.5 = testedLegOutRetracePct, चाहें तो params में बदल सकते हैं)। जब price इस area
+     टच कर ले, तभी zone "Tested" बनेगी — सिर्फ़ zone के ऊपरी किनारे (proximal) को छूना
+     Tested नहीं मानी जाएगी, और डिस्टल लाइन तक पहुँचना Broken माना जाएगा।
+     Zone dataclass में अब legOutHigh, legOutLow, legOutMidLevel — ये तीन नए fields
+     जोड़ दिए गए हैं ताकि यह स्तर हर candle पर दोबारा-दोबारा ना निकालना पड़े (ज़ोन बनते
+     वक़्त एक बार calculate करके स्टोर कर लिया जाता है)।
 
   (v8.3/v8.4 में पहले से मौजूद और बिना बदलाव के रखे गए नियम):
-    - "Leg-In का TR, ATR से बड़ा हो + छोटी wick हो तो अच्छा zone": legInMinAtrMult +
-      legInMinBodyPct + hqLegInAtrMult स्कोरिंग बोनस से पहले से कवर है।
-    - "Base कैंडल का TR, ATR से छोटा हो": maxBaseAtrMult=1.0 चेक से पहले से लागू है।
+    - "Leg-In का TR, ATR से बड़ा हो + छोटी wick हो इतना ही काफी है"
+    - "Base कैंडल में सबसे बड़ा जिस base कैंडल का TR बड़ा हो, वो ATR से छोटा हो": maxBaseAtrMult चेक से लागू है।
     - "2 से ज़्यादा बार Tested zone अब invalid/Broken" (v8.4)
     - "Leg-Out की body पूरे base-zone को engulf ना करे" (v8.4)
-    - "Opposite-color पीछे वाली candle का 50%+ cover सिर्फ़ BODY से नापा जाए" (v8.4)
+    - "legin के पीछे वाली Opposite-color candle का 50%+ cover सिर्फ़ BODY से नापा जाए" (v8.4)
     - "DBR में legOut की body-position OR body% (heavy buying pressure)" (v8.4)
-    - densityScore < 60 वाला zone सिरे से invalid (v8.3)
+    - densityScore < 40 वाला zone सिरे से invalid (v8.3)
     - `sweptLiquidity` field हटाई गई (v8.3)
 
 ------------------------------------------------------------------
@@ -56,17 +70,17 @@ FULL VALIDATION (v8.5)
     - correct direction (bull/bear)
     - Body Strength: |Close-Open| / (High-Low) >= 60%
     - Opposite-color पीछे वाली candle की सिर्फ़ BODY leg-in range का 50%+ cover ना करे
-    - TR >= 1.0 x ATR
+    - TR >= ATR
     - TR >= 2.0 x Max Base TR
 
   BASE (1-3 candles):
-    - each candle TR <= 1.0 x ATR
+    - each candle TR <= ATR
 
   LEG-OUT:
     - correct direction
-    - Explosive: TR >= 1.2 x ATR
+    - Explosive: TR >= 1.2 x ATR (legOutTrMult)
     - Wick % <= 25%
-    - TR Hierarchy: LegOut >= LegIn > MaxBaseTR                    [FIX v8.5: >= नहीं >]
+    - TR Hierarchy: LegOut >= LegIn > MaxBaseTR       (यह नियम अनिवार्य है)
     - Volume: Volume[legOut] > Volume[legIn]
     - Leg-Out की सिर्फ़ BODY पूरे base-zone (wick सहित) को engulf ना करे
     - Imbalance (if useImbalance):
@@ -75,15 +89,15 @@ FULL VALIDATION (v8.5)
         + gap का size legIn TR से बड़ा नहीं हो
 
   SCORE:
-    - densityScore < 60  -> zone सिरे से invalid (discard)
-    - densityScore >= 70 -> High-Quality (HQ) zone
+    - densityScore < 40  -> zone सिरे से invalid (discard)
+    - densityScore >= 90 -> High-Quality (HQ) zone
     - Leg-Out >= 2.0x Leg-In TR -> बोनस (hqLegOutTrMult)
     - DBR में legOut का body-position OR body% (heavy buying pressure) -> बोनस
     - असली प्राइस-गैप (genuine imbalance) मौजूद होने पर -> बोनस                [NEW v8.5]
 
   STATE:
-    - Tested तभी बने जब price, LEG-OUT कैंडल के रेंज के 50% (या इससे ज़्यादा) तक
-      वापस retrace कर आए                                                     [CHANGED v8.5]
+    - Tested तभी बने जब price, LEG-OUT कैंडल के 50% area (या इससे ज़्यादा) तक
+      वापस retrace कर आए
     - touchCount > 2 होने पर zone अपने-आप Broken हो जाती है
 
 Public entry points:
@@ -101,7 +115,7 @@ import pandas as pd  # टाइम-सीरीज़ और टेक्नि
 # सिस्टम के डिफ़ॉल्ट पैरामीटर्स की डिक्शनरी (मशीन/अल्गो की मूल सेटिंग्स)
 DEFAULT_PARAMS = dict(
     # --- कैपिटल और रिस्क सेटिंग्स ---
-    accountCapital=25000.0,   # खाता की कुल पूँजी ($25,000)
+    accountCapital=25000.0,   # खाता की कुल पूँजी ($25,000) — अब सिर्फ़ SL/TP गणना के संदर्भ के लिए रखा है
     riskPct=0.5,              # प्रति ट्रेड लिया जाने वाला रिस्क प्रतिशत (0.5%)
     targetRR=5.0,             # रिस्क-टू-रिवॉर्ड अनुपात लक्ष्य (1:5)
     slBufferAtr=0.1,          # स्टॉपलॉस में ATR का अतिरिक्त बफर (0.1x ATR)
@@ -109,18 +123,20 @@ DEFAULT_PARAMS = dict(
     # --- एल्गोरिदम और फिल्टर्स ---
     atrPeriod=14,             # ATR (Average True Range) इंडिकेटर की अवधि (14 कैंडल्स)
     volSmaPeriod=20,          # औसतन वॉल्यूम निकालने की अवधि (20 कैंडल्स का SMA)
-    legOutTrMult=1.2,         # Leg-Out कैंडल का न्यूनतम True Range मल्टीप्लायर (1.2x ATR)
-    legOutMinTrRatio=1.0,     # NEW/FIX (v8.5): Leg-Out TR, Leg-In TR का कम से कम इतना गुना होना
+    legOutTrMult=1.2,         # [FIXED] Leg-Out कैंडल का ATR-आधारित मल्टीप्लायर — Leg-Out का TR
+                                # कम से कम इतने गुना ATR (1.2x) होना चाहिए, तभी उसे "explosive" माना जाएगा
+    legOutMinTrRatio=1.0,     # [FIXED] Leg-Out TR, Leg-In TR का कम से कम इतना गुना होना
                                 # चाहिए (1.0 = बराबर या बड़ा) — validity के लिए, पहले सख्ती से `>` था
     hqLegOutTrMult=2.0,       # हाई-क्वालिटी Leg-Out कैंडल का TR मल्टीप्लायर (Leg-In TR का 2.0x, सिर्फ़ स्कोरिंग बोनस)
-    hqLegInAtrMult=1.5,       # हाई-क्वालिटी Leg-In कैंडल का TR (ATR का 1.5x)
-    maxBaseAtrMult=1.0,       # बेस कैंडल का अधिकतम आकार (1.0x ATR से बड़ा न हो)
+    hqLegInAtrMult=1.5,       # [FIXED] (पहले गलत नाम "hqLegIntrMult" था) हाई-क्वालिटी Leg-In कैंडल का TR, ATR का 1.5x
+    maxBaseAtrMult=1.0,       # [FIXED] बेस कैंडल में जिस भी base कैंडल का TR सबसे बड़ा हो, वो ATR के
+                                # इतने गुना (1.0x) से छोटा होना चाहिए (यानी base, ATR से बड़ा TR ना दे)
     maxWickPct=0.25,          # Leg-Out कैंडल में अधिकतम विक/शैडो % (25%)
 
     # --- बेस और लेग-इन नियम ---
     minBaseCount=1,             # ज़ोन में कम से कम बेस कैंडल्स (1)
     maxBaseCount=3,             # ज़ोन में अधिकतम बेस कैंडल्स (3)
-    legInMinAtrMult=1.0,        # Leg-In कैंडल का TR कम से कम 1.0x ATR होना चाहिए
+    legInMinAtrMult=1.0,        # [FIXED] (पहले गलत नाम "legInMintrMult" था) Leg-In कैंडल का TR कम से कम ATR के बराबर (1.0x) होना चाहिए
     minClvPct=0.60,             # Leg-In कैंडल का न्यूनतम Close Location Value (60%)
     legInToBaseSizeMult=2.0,    # Leg-In कैंडल सबसे बड़ी बेस कैंडल से कम से कम 2x बड़ी होनी चाहिए
     legInMinBodyPct=0.60,       # Leg-In कैंडल की BODY, उसकी कुल रेंज (High-Low) का कम से कम 60% होनी चाहिए
@@ -132,22 +148,22 @@ DEFAULT_PARAMS = dict(
                                      # होने पर मिलने वाला डेंसिटी-स्कोर बोनस
 
     # --- विपरीत-रंग वाली पीछे की candle का filter (सिर्फ़ BODY पर आधारित) ---
-    rejectOppositeCoverPct=0.50,   # agar leg-in ke theek peeche wali opposite-color
-                                    # candle ki BODY leg-in ki range ka >=50% cover kare
-                                    # to zone invalid (सिर्फ़ body, poori wick range nahi)
+    rejectOppositeCoverPct=0.50,   # अगर leg-in के ठीक पीछे वाली opposite-color candle
+                                     # की BODY, leg-in की रेंज का >=50% cover करे,
+                                     # तो zone invalid (सिर्फ़ body, पूरी wick range नहीं)
 
     # --- डेंसिटी स्कोर थ्रेशोल्ड ---
-    minValidScore=60,              # इससे कम स्कोर वाला zone सिरे से invalid माना जाता है
-    hqScoreThreshold=70,           # इतने या इससे ज़्यादा स्कोर वाला zone High-Quality (HQ) माना जाता है
+    minValidScore=40,              # इससे कम स्कोर वाला zone सिरे से invalid माना जाता है
+    hqScoreThreshold=90,           # इतने या इससे ज़्यादा स्कोर वाला zone High-Quality (HQ) माना जाता है
 
     # --- DBR में leg-out के लिए "heavy buying pressure" वैकल्पिक शर्त ---
     legOutBodyHeavyPressurePct=0.60,  # DBR pattern में legOut की body इतने % (range का) से बड़ी हो तो
                                         # body-position चेक (>=80% close) के बराबर ही अंक मिल जाते हैं
 
     # --- Tested-state और re-touch invalidation ---
-    testedLegOutRetracePct=0.50,   # CHANGED (v8.5): zone को "Tested" मानने के लिए price को LEG-OUT
+    testedLegOutRetracePct=0.50,   # zone को "Tested" मानने के लिए price को LEG-OUT
                                      # कैंडल की खुद की रेंज में कम से कम इतनी गहराई (50%) तक वापस आना
-                                     # ज़रूरी है (पहले यह base zone proximal-distal पर आधारित था)
+                                     # होगा (legOutHigh/legOutLow के बीच के 50% स्तर पर आधारित)
     maxTestedCount=2,               # zone को इससे ज़्यादा बार टेस्ट होने पर (touchCount > 2)
                                      # अपने-आप invalid/Broken मान लिया जाता है
 )
@@ -174,11 +190,11 @@ class Zone:
     createdBarIndex: int = 0        # ज़ोन पूरा बनने वाली कैंडल (Leg-Out) का इंडेक्स
     baseCount: int = 0              # ज़ोन में शामिल बेस कैंडल्स की संख्या
     timestamp: object = None        # ज़ोन बनने की तिथि व समय
-    qty: float = 0.0                # रिस्क मैनेजमेंट के आधार पर ट्रेड क्वांटिटी
-    legOutHigh: float = 0.0         # NEW (v8.5): Leg-Out कैंडल का High (Tested-level निकालने के लिए)
-    legOutLow: float = 0.0          # NEW (v8.5): Leg-Out कैंडल का Low
-    legOutMidLevel: float = 0.0     # NEW (v8.5): Leg-Out रेंज का testedLegOutRetracePct स्तर (Tested के लिए)
-    # NOTE: sweptLiquidity field जानबूझकर यहाँ से हटाई गई है (v8.3 से)
+    legOutHigh: float = 0.0         # Leg-Out कैंडल का High (Tested-level निकालने के लिए)
+    legOutLow: float = 0.0          # Leg-Out कैंडल का Low
+    legOutMidLevel: float = 0.0     # Leg-Out रेंज का testedLegOutRetracePct स्तर (Tested के लिए)
+    # NOTE: sweptLiquidity field जानबूझकर यहाँ से हटाई गई है (v8.3)
+    # NOTE: [FIXED/REMOVED] qty field हटाई गई है (आपके कमेंट "इसे हटा दीजिए" के मुताबिक)
 
 
 # Wilder's Smoothing विधि द्वारा ATR (Average True Range) की गणना करने वाला फ़ंक्शन
@@ -531,19 +547,19 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 densityScore += p["genuineGapScoreBonus"]
 
             # ---------------- स्कोर-आधारित वैलिडिटी फ़िल्टर ----------------
-            # 60 से कम स्कोर वाले zone को वैलिड नहीं माना जाएगा, यानी वो zone सिरे से discard
-            # हो जाएगा (ना तो normal ना ही HQ zone बनेगा)। zoneFoundOnThisBar अभी True नहीं
-            # किया गया, ताकि यह ज़ोन reject होने पर इसी candle t पर बड़ी baseCount भी आज़माई
-            # जा सके।
+            # minValidScore से कम स्कोर वाले zone को वैलिड नहीं माना जाएगा, यानी वो zone सिरे
+            # से discard हो जाएगा (ना तो normal ना ही HQ zone बनेगा)। zoneFoundOnThisBar अभी
+            # True नहीं किया गया, ताकि यह ज़ोन reject होने पर इसी candle t पर बड़ी baseCount
+            # भी आज़माई जा सके।
             if densityScore < p["minValidScore"]:
                 continue  # स्कोर बहुत कम -> zone invalid -> अगली baseCount try करें
 
-            # 70 या उससे अधिक अंक पाने वाले ज़ोन को High Quality (HQ) माना जाएगा
+            # hqScoreThreshold या उससे अधिक अंक पाने वाले ज़ोन को High Quality (HQ) माना जाएगा
             isHQZone = densityScore >= p["hqScoreThreshold"]
 
             zoneFoundOnThisBar = True  # ज़ोन सफलतापूर्वक खोज लिया गया (score-filter भी पास हुआ)
 
-            # ---------------- प्रॉक्सिमल और डिस्टल लाइन्स (Entry/SL/TP/Qty) ----------------
+            # ---------------- प्रॉक्सिमल और डिस्टल लाइन्स (Entry/SL/TP) ----------------
             # प्रॉक्सिमल (एंट्री स्तर): डिमांड में Base का High, सप्लाई में Base का Low
             proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
             # डिस्टल (ज़ोन की सीमा): डिमांड में Base का Low, सप्लाई में Base का High
@@ -555,11 +571,10 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             # टेक प्रॉफिट: प्रॉक्सिमल + (रिस्क * R:R)
             tpVal = (proxVal + riskPerShare * p["targetRR"]) if isDemandLegOut else (proxVal - riskPerShare * p["targetRR"])
 
-            # रिस्क-आधारित क्वांटिटी कैलकुलेशन
-            riskAmount = p["accountCapital"] * (p["riskPct"] / 100.0)  # खाते का कुल डॉलर रिस्क
-            qty = round(riskAmount / riskPerShare, 2) if riskPerShare > 0 else 0.0  # शेयर्स/लॉट संख्या
+            # [FIXED/REMOVED] यहाँ पहले "रिस्क-आधारित क्वांटिटी कैलकुलेशन" (riskAmount, qty) होती
+            # थी। आपके कमेंट "इसे हटा दीजिए" के मुताबिक अब qty नहीं निकाला जाता।
 
-            # ---------------- NEW (v8.5): Tested-state के लिए LEG-OUT कैंडल का 50%-रीट्रेस स्तर ----------------
+            # ---------------- Tested-state के लिए LEG-OUT कैंडल का 50%-रीट्रेस स्तर ----------------
             # Demand zone में price ऊपर से वापस नीचे आकर legOutHigh से 50% (testedLegOutRetracePct)
             # रीट्रेस कर ले तो "Tested" — Supply zone में price नीचे से वापस ऊपर आकर legOutLow से
             # 50% रीट्रेस कर ले तो "Tested"। दोनों फ़ॉर्मूला 50% पर एक ही मध्य-बिंदु देते हैं।
@@ -597,14 +612,14 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             leftBar = t - baseCount  # ज़ोन की शुरुआत का इंडेक्स
 
-            # नया Zone ऑब्जेक्ट निर्मित किया गया (sweptLiquidity पास नहीं किया जाता, field हटा दी गई है)
+            # नया Zone ऑब्जेक्ट निर्मित किया गया (sweptLiquidity और qty पास नहीं किए जाते, दोनों फ़ील्ड हटा दी गई हैं)
             newZone = Zone(
                 proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
                 isDemand=isDemandLegOut, isHQ=isHQZone, densityScore=densityScore,
                 patternType=patternType, zoneCategory=zoneCategory, state="Fresh",
                 touchCount=0, originalDensityScore=densityScore,
                 startBarIndex=leftBar, createdBarIndex=t, baseCount=baseCount,
-                timestamp=df.index[t], qty=qty,
+                timestamp=df.index[t],
                 legOutHigh=legOutHigh, legOutLow=legOutLow, legOutMidLevel=legOutMidLevel,
             )
             zones.append(newZone)        # मास्टर लिस्ट में जोड़ा गया
@@ -612,10 +627,10 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
         # ---------------- ज़ोन स्टेटस ट्रैकिंग (Fresh, Tested, Broken) ----------------
         # यह हर candle t पर चलता है, ताकि पुराने zones का state (टच/टूट) अपडेट होता रहे।
-        # CHANGED (v8.5): "Tested" अब base-zone के proximal-distal मध्य-बिंदु से नहीं, बल्कि
-        # खुद LEG-OUT कैंडल के रेंज के 50% रीट्रेसमेंट (legOutMidLevel, ज़ोन बनते वक़्त ही
-        # calculate करके स्टोर किया गया) से तय होता है। साथ ही अगर कोई zone 2 से ज़्यादा बार
-        # (touchCount > maxTestedCount) टेस्ट हो चुकी है, तो उसे भी Broken मानकर हटा दिया जाता है।
+        # "Tested" base-zone के proximal-distal मध्य-बिंदु से नहीं, बल्कि खुद LEG-OUT कैंडल के
+        # रेंज के 50% रीट्रेसमेंट (legOutMidLevel, ज़ोन बनते वक़्त ही calculate करके स्टोर किया
+        # गया) से तय होता है। साथ ही अगर कोई zone maxTestedCount से ज़्यादा बार (touchCount >
+        # maxTestedCount) टेस्ट हो चुकी है, तो उसे भी Broken मानकर हटा दिया जाता है।
         if active_zones:
             lo_t, hi_t = l[t], h[t]  # वर्तमान कैंडल का Low और High
             still_active = []        # जीवित (Non-Broken) ज़ोन्स की सूची
@@ -647,7 +662,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                         elif hi_t >= z.legOutMidLevel:
                             z.touchCount += 1   # दोबारा >=50% रीट्रेस तक टच हुआ
 
-                # 2 से ज़्यादा बार टेस्ट हो चुकी zone अब वैलिड नहीं — Broken कर दें
+                # maxTestedCount से ज़्यादा बार टेस्ट हो चुकी zone अब वैलिड नहीं — Broken कर दें
                 if z.state == "Tested" and z.touchCount > p["maxTestedCount"]:
                     z.state = "Broken"
 
@@ -684,11 +699,11 @@ def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_p
         # तय की गई निकटता (proximity percentage) सीमा की जाँच
         if not (min_proximity_pct <= diff_pct <= max_proximity_pct):
             continue
-        # अलर्ट डिक्शनरी बनाकर सूची में जोड़ा गया (swept_liquidity key यहाँ से हटा दी गई है)
+        # अलर्ट डिक्शनरी बनाकर सूची में जोड़ा गया (swept_liquidity और qty keys यहाँ से हटा दी गई हैं)
         alerts.append({
             "direction": direction, "pattern": z.patternType, "category": z.zoneCategory,
             "entry": z.proxVal, "sl": z.slVal, "tp": z.tpVal, "is_hq": z.isHQ,
-            "score": z.densityScore, "touch_count": z.touchCount, "qty": z.qty,
+            "score": z.densityScore, "touch_count": z.touchCount,
             "distance_pct": diff_pct * 100, "state": z.state, "timestamp": z.timestamp,
         })
     # हाई-क्वालिटी और निकटता (Distance) के आधार पर अलर्ट्स को सॉर्ट किया गया
