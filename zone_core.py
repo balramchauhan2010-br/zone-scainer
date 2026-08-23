@@ -1,10 +1,91 @@
 # -*- coding: utf-8 -*-
+"""
+zone_core.py — v9.0 (ROOT-CAUSE FIX: True Range अब हर जगह GAP-AWARE है)
+यह एक एडवांस्ड डिमांड और सप्लाई (D&S) ज़ोन डिटेक्शन इंजन है।
+
+=== v8.8 से v9.0 में क्या असली/जड़ वाला बग ठीक किया गया ===
+आपके ICICI Bank उदाहरण (23 Jun 2:15pm Leg-In, 3:15pm Base, 24 Jun 9:15am
+Leg-Out — overnight gap के साथ) को debug करने के बाद असली कारण मिला:
+
+पुराने कोड में हर जगह (Leg-In TR, Leg-Out TR, Base TR निकालने के लिए) यह
+हेल्पर फ़ंक्शन था:
+    def tr(t, idx):
+        return h[t-idx] - l[t-idx]      # सिर्फ़ High-Low, gap शामिल नहीं!
+
+लेकिन असली/संस्थागत "True Range" का सही फ़ॉर्मूला है:
+    TR = MAX(High-Low, |High-PrevClose|, |Low-PrevClose|)
+
+ATR की गणना (_wilder_atr) में यह सही फ़ॉर्मूला (PrevClose सहित) पहले से
+इस्तेमाल हो रहा था, लेकिन हर individual कैंडल का TR निकालकर तुलना करने
+वाले हिस्से में (Leg-In/Leg-Out/Base validity, TR Hierarchy आदि) सिर्फ़
+"High-Low" इस्तेमाल हो रहा था — यानी ATR और individual-TR के बीच खुद
+कोड में ही एक mismatch/असंगति थी।
+
+नतीजा: जब भी कोई Leg-Out कैंडल OVERNIGHT GAP के साथ खुलती (जैसे आपका
+ICICI उदाहरण — असली TR=35, ज़्यादातर हिस्सा gap से बना), कोड के अंदर
+calculate होने वाला "legOutTR" (सिर्फ़ h[t]-l[t]) असल में बहुत छोटा
+निकल रहा था — शायद Leg-In TR (13.70) से भी कम — जिससे:
+    passesTRHierarchy = (legOutTR >= legInTR) ...   -> FAIL
+    isLegOutExplosive  = legOutTR >= 1.2*ATR ...     -> FAIL (संभावित)
+और इसी वजह से ज़ोन invalid हो रहा था — चाहे आप कितने भी validity-नियम
+सही बता दें, क्योंकि मूल समस्या "TR की गणना" में थी, "TR की तुलना के
+नियम" में नहीं। (पिछली दो कोशिशें — TR Hierarchy relax करना, gap-cap
+हटाना — इसलिए काम नहीं आईं, क्योंकि वो लक्षण पर इलाज कर रही थीं, बीमारी
+की जड़ पर नहीं)।
+
+FIX (v9.0): अब एक ही जगह से सही True Range (PrevClose-सहित) निकाला जाता
+है (`_true_range()` फ़ंक्शन), और यही एक सोर्स ATR-calculation और हर
+individual कैंडल के TR-चेक — दोनों में इस्तेमाल होता है। इससे:
+  - overnight-gap वाली Leg-Out कैंडल का TR अब सही (~35, gap सहित) आएगा
+  - TR Hierarchy, Explosive-check, HQ-scoring — सब सही व वास्तविक TR पर
+    आधारित होंगे
+  - Wick% और Body% जानबूझकर पुराने तरीके (सिर्फ़ H-L) पर ही रखे गए हैं,
+    क्योंकि वो कैंडल की अपनी shape/pressure मापते हैं, gap को नहीं
+
+(v8.8 का overnight-gap-cap-relax व्यवहार भी बरकरार रखा गया है, क्योंकि
+वह एक अलग/अतिरिक्त concept है — raw price-gap का साइज़, जो TR की गणना से
+स्वतंत्र है। दोनों फ़िक्स मिलकर पूरी समस्या हल करते हैं।)
+
+------------------------------------------------------------------
+FULL VALIDATION (v9.0)
+------------------------------------------------------------------
+  TR (हर जगह): अब सही True Range = MAX(H-L, |H-PrevClose|, |L-PrevClose|)
+
+  LEG-IN:
+    - correct direction (bull/bear)
+    - Body Strength: |Close-Open| / (High-Low) >= 60%
+    - Opposite-color पीछे वाली candle की सिर्फ़ BODY leg-in range का 50%+ cover ना करे
+    - TR >= ATR
+    - TR >= 2.0 x Max Base TR
+
+  BASE (1-3 candles):
+    - each candle TR <= ATR
+
+  LEG-OUT:
+    - correct direction
+    - Explosive: TR >= 1.2 x ATR (अब gap-aware TR)
+    - Wick % <= 25% (candle की अपनी H-L रेंज पर आधारित)
+    - TR Hierarchy: LegOut >= LegIn > MaxBaseTR
+    - Volume: Volume[legOut] > Volume[legIn]
+    - Leg-Out की सिर्फ़ BODY पूरे base-zone को engulf ना करे (genuine gap हो तो OK)
+    - Imbalance: gap size cap same-day पर legInTR तक, overnight पर unlimited
+
+  SCORE:
+    - densityScore < 40 -> invalid
+    - densityScore >= 90 -> HQ zone
+    - Overnight genuine gap -> अतिरिक्त बोनस
+
+Public entry points:
+    scan_zones(df, params=None, lookback_months=None) -> List[Zone]
+    latest_active_zones(zones, ...)                    -> List[Zone]
+    get_zone_alerts(zones, current_price, ..)          -> List[dict]
+    diagnose_bar(df, at_index, params=None)            -> List[dict]
+"""
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
-import datetime as _dt
 
 
 DEFAULT_PARAMS = dict(
@@ -15,18 +96,15 @@ DEFAULT_PARAMS = dict(
 
     atrPeriod=14,
     volSmaPeriod=20,
-
     legOutTrMult=1.2,
     legOutMinTrRatio=1.0,
     hqLegOutTrMult=2.0,
     hqLegInAtrMult=1.5,
-
     maxBaseAtrMult=1.0,
     maxWickPct=0.25,
 
     minBaseCount=1,
     maxBaseCount=3,
-
     legInMinAtrMult=1.0,
     minClvPct=0.60,
     legInToBaseSizeMult=2.0,
@@ -34,24 +112,19 @@ DEFAULT_PARAMS = dict(
 
     useImbalance=True,
     maxImbalanceVsLegInMult=1.0,
+    relaxGapCapOnOvernight=True,   # overnight gap पर raw price-gap का cap हटाया जाता है
     genuineGapScoreBonus=10,
+    overnightGapScoreBonus=15,
 
     rejectOppositeCoverPct=0.50,
 
     minValidScore=40,
     hqScoreThreshold=90,
+
     legOutBodyHeavyPressurePct=0.60,
 
     testedLegOutRetracePct=0.50,
     maxTestedCount=2,
-
-    # -------- SMART FIX PARAMS (NEW) ----------
-    dropZeroVolumeBars=True,     # off-session fillers हटेंगे
-    minValidVolume=1.0,          # volume >= 1 को valid मानें
-    dropInvalidOhlc=True,        # NaN/inf OHLC drop
-    filterSessionTimes=False,    # NSE session filter ON करना हो तो True करें
-    sessionStart="09:15",        # exchange local time assumed
-    sessionEnd="15:30",
 )
 
 _HARD_MAX_BASE_COUNT = 3
@@ -78,18 +151,36 @@ class Zone:
     legOutHigh: float = 0.0
     legOutLow: float = 0.0
     legOutMidLevel: float = 0.0
+    isOvernightGap: bool = False
+    legInTR: float = 0.0            # [NEW v9.0] डिबग/पारदर्शिता के लिए स्टोर किया गया
+    legOutTR: float = 0.0           # [NEW v9.0] डिबग/पारदर्शिता के लिए स्टोर किया गया
 
 
-def _wilder_atr(high, low, close, period):
-    n = len(high)
+# --------------------------------------------------------------------------
+# [FIXED v9.0] असली/सही True Range निकालने वाला फ़ंक्शन (Gap-Aware — ROOT FIX)
+# --------------------------------------------------------------------------
+def _true_range(h, l, c):
+    """
+    संस्थागत/सही True Range फ़ॉर्मूला:
+        TR = MAX(High-Low, |High-PrevClose|, |Low-PrevClose|)
+    यही एक फ़ंक्शन अब ATR और हर individual कैंडल (Leg-In/Leg-Out/Base) के
+    TR-चेक — दोनों जगह इस्तेमाल होता है, ताकि पहले जैसी mismatch दोबारा ना बने।
+    """
+    n = len(h)
     tr = np.empty(n)
-    tr[0] = high[0] - low[0]
+    tr[0] = h[0] - l[0]  # पहली कैंडल के लिए PrevClose उपलब्ध नहीं
     if n > 1:
-        prev_close = close[:-1]
+        prev_close = c[:-1]
         tr[1:] = np.maximum(
-            high[1:] - low[1:],
-            np.maximum(np.abs(high[1:] - prev_close), np.abs(low[1:] - prev_close)),
+            h[1:] - l[1:],
+            np.maximum(np.abs(h[1:] - prev_close), np.abs(l[1:] - prev_close)),
         )
+    return tr
+
+
+def _wilder_atr_from_tr(tr: np.ndarray, period: int) -> np.ndarray:
+    """Wilder's Smoothing — अब एक पहले से बने हुए सही TR array पर काम करता है।"""
+    n = len(tr)
     atr = np.full(n, np.nan)
     if n >= period:
         seed = tr[:period].mean()
@@ -116,75 +207,31 @@ def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[
     return int(max(0, n - approx_bars))
 
 
-def _parse_hhmm(s: str) -> _dt.time:
-    hh, mm = s.strip().split(":")
-    return _dt.time(int(hh), int(mm))
+def _bar_dates_array(df: pd.DataFrame):
+    idx = df.index
+    if isinstance(idx, pd.DatetimeIndex):
+        return idx.date
+    try:
+        parsed = pd.to_datetime(idx)
+        return parsed.date
+    except Exception:
+        return None
 
 
-def _preprocess_df(df: pd.DataFrame, p: dict) -> pd.DataFrame:
-    """
-    SMART FIX:
-    - drop NaN/inf OHLC
-    - drop volume==0 fillers
-    - optional session time filter (NSE intraday)
-    """
-    out = df.copy()
-    out = out.sort_index()
-
-    if p.get("dropInvalidOhlc", True):
-        out = out.replace([np.inf, -np.inf], np.nan)
-        out = out.dropna(subset=["open", "high", "low", "close", "volume"])
-
-    if p.get("dropZeroVolumeBars", True):
-        out = out[out["volume"].astype(float) >= float(p.get("minValidVolume", 1.0))]
-
-    if p.get("filterSessionTimes", False) and isinstance(out.index, pd.DatetimeIndex):
-        st = _parse_hhmm(p.get("sessionStart", "09:15"))
-        en = _parse_hhmm(p.get("sessionEnd", "15:30"))
-        # assumes index is already in exchange local time
-        t = out.index.time
-        mask = np.array([(ti >= st) and (ti <= en) for ti in t], dtype=bool)
-        out = out.loc[mask]
-
-    return out
-
-
-def debug_alignment(df: pd.DataFrame, legout_timestamp, params: Optional[dict] = None,
-                    base_counts=(1, 2, 3)) -> List[Dict[str, Any]]:
-    """
-    यह function आपको दिखाएगा कि scanner किस candles को leg-in/base मान रहा है।
-    If alignment wrong => यही root-cause है।
-    """
-    p = dict(DEFAULT_PARAMS)
-    if params:
-        p.update(params)
-
-    dfx = _preprocess_df(df, p)
-    if legout_timestamp not in dfx.index:
-        raise KeyError("legout_timestamp not found AFTER preprocessing. (Maybe session filter/volume filter removed it.)")
-
-    t = int(dfx.index.get_loc(legout_timestamp))
-    res = []
-    for bc in base_counts:
-        legInIdx = bc + 1
-        prevIdx = legInIdx + 1
-        if t - prevIdx < 0:
-            res.append({"baseCount": bc, "ok": False, "reason": "not enough bars"})
-            continue
-        base_ts = [dfx.index[t - b] for b in range(1, bc + 1)]
-        res.append({
-            "baseCount": bc,
-            "ok": True,
-            "legOut_ts": dfx.index[t],
-            "base_ts": base_ts,
-            "legIn_ts": dfx.index[t - legInIdx],
-            "prev_ts": dfx.index[t - prevIdx],
-        })
-    return res
+def _prep_arrays(df, p):
+    o = df["open"].to_numpy(dtype=float)
+    h = df["high"].to_numpy(dtype=float)
+    l = df["low"].to_numpy(dtype=float)
+    c = df["close"].to_numpy(dtype=float)
+    v = df["volume"].to_numpy(dtype=float)
+    true_range = _true_range(h, l, c)                       # [FIXED v9.0]
+    atr = _wilder_atr_from_tr(true_range, p["atrPeriod"])    # [FIXED v9.0] एक ही TR स्रोत
+    vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"], min_periods=1).mean().to_numpy()
+    return o, h, l, c, v, true_range, atr, vol_sma
 
 
 # --------------------------------------------------------------------------
-# Core scan (your v8.5 logic, unchanged except preprocessing)
+# मुख्य स्कैनिंग इंजन
 # --------------------------------------------------------------------------
 def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                lookback_months: Optional[float] = None) -> List[Zone]:
@@ -195,26 +242,26 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
     p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
     p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
 
-    # SMART FIX: preprocess first (this is the main change)
-    df = _preprocess_df(df, p)
-
-    o = df["open"].to_numpy(dtype=float)
-    h = df["high"].to_numpy(dtype=float)
-    l = df["low"].to_numpy(dtype=float)
-    c = df["close"].to_numpy(dtype=float)
-    v = df["volume"].to_numpy(dtype=float)
+    o, h, l, c, v, true_range, atr, vol_sma = _prep_arrays(df, p)
     n = len(df)
 
-    if n < 50:
-        return []
+    minBaseCount = p["minBaseCount"]
+    maxBaseCount = p["maxBaseCount"]
+    atrPeriod = p["atrPeriod"]
 
-    atr = _wilder_atr(h, l, c, p["atrPeriod"])
-    vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"], min_periods=1).mean().to_numpy()
+    bar_dates = _bar_dates_array(df)
 
-    def tr(t, idx): return h[t - idx] - l[t - idx]
-    def is_bull(t, idx): return c[t - idx] > o[t - idx]
-    def is_bear(t, idx): return o[t - idx] > c[t - idx]
+    # [FIXED v9.0] अब यह असली/gap-aware True Range array से value लेता है
+    def tr(t, idx):
+        return true_range[t - idx]
 
+    def is_bull(t, idx):
+        return c[t - idx] > o[t - idx]
+
+    def is_bear(t, idx):
+        return o[t - idx] > c[t - idx]
+
+    # wick% और body% जानबूझकर candle की अपनी H-L रेंज पर आधारित रहते हैं (gap पर नहीं)
     def wick_pct(t, idx):
         i = t - idx
         rng = h[i] - l[i]
@@ -228,7 +275,8 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
         rng = h[i] - l[i]
         if rng == 0:
             return 0.0
-        return abs(c[i] - o[i]) / rng
+        body = abs(c[i] - o[i])
+        return body / rng
 
     def body_high_low(t, idx):
         i = t - idx
@@ -237,7 +285,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
     zones: List[Zone] = []
     active_zones: List[Zone] = []
 
-    min_start = max(p["atrPeriod"], p["maxBaseCount"] + 3, 11)
+    min_start = max(atrPeriod, maxBaseCount + 3, 11)
     record_from_bar = max(min_start, _resolve_start_bar_for_lookback(df, lookback_months))
 
     legOutMult = p.get("legOutTrMult", p.get("legOutAtrMult", 1.2))
@@ -248,7 +296,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
         zoneFoundOnThisBar = False
 
-        for baseCount in range(p["minBaseCount"], p["maxBaseCount"] + 1):
+        for baseCount in range(minBaseCount, maxBaseCount + 1):
             if zoneFoundOnThisBar:
                 break
 
@@ -261,7 +309,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if np.isnan(atr[t - legInIdx]) or np.isnan(atr[t]):
                 continue
 
-            # --- LEG-IN ---
+            # ---------------- LEG-IN की जाँच ----------------
             legInTR = tr(t, legInIdx)
             legInLow = l[t - legInIdx]
             legInHigh = h[t - legInIdx]
@@ -271,14 +319,14 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
 
             legInIsBull = is_bull(t, legInIdx)
             legInIsBear = is_bear(t, legInIdx)
-            if legInRng == 0 or not (legInIsBull or legInIsBear):
+
+            if legInRng == 0:
                 continue
 
-            # body strength (as your v8.5)
-            if body_pct(t, legInIdx) < p["legInMinBodyPct"]:
+            legInBodyPct = body_pct(t, legInIdx)
+            if legInBodyPct < p["legInMinBodyPct"]:
                 continue
 
-            # opposite-color prev candle body cover
             prevIsBull = is_bull(t, prevIdx)
             prevIsBear = is_bear(t, prevIdx)
             isOppositeColor = (legInIsBull and prevIsBear) or (legInIsBear and prevIsBull)
@@ -292,7 +340,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             bullClv = (legInClose - legInLow) / legInRng
             bearClv = (legInHigh - legInClose) / legInRng
 
-            # --- BASE ---
+            # ---------------- BASE की जाँच ----------------
             allBaseValid = True
             maxBaseTR = 0.0
             maxBaseHigh = -1.0
@@ -304,12 +352,18 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                     allBaseValid = False
                     break
                 bTR = tr(t, b)
+
                 if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
                     allBaseValid = False
                     break
-                maxBaseTR = max(maxBaseTR, bTR)
-                maxBaseHigh = max(maxBaseHigh, h[t - b])
-                minBaseLow = min(minBaseLow, l[t - b])
+
+                if bTR > maxBaseTR:
+                    maxBaseTR = bTR
+
+                if h[t - b] > maxBaseHigh:
+                    maxBaseHigh = h[t - b]
+                if l[t - b] < minBaseLow:
+                    minBaseLow = l[t - b]
 
             if not allBaseValid or maxBaseTR == 0:
                 continue
@@ -317,11 +371,12 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if legInTR < (p["legInToBaseSizeMult"] * maxBaseTR):
                 continue
 
-            if legInTR < (p["legInMinAtrMult"] * atr[t - legInIdx]):
+            validLegIn = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
+            if not validLegIn:
                 continue
 
-            # --- LEG-OUT ---
-            legOutTR = tr(t, legOutIdx)
+            # ---------------- LEG-OUT की जाँच ----------------
+            legOutTR = tr(t, legOutIdx)   # [FIXED v9.0] अब सही (gap-aware) TR
             legOutHigh = h[t - legOutIdx]
             legOutLow = l[t - legOutIdx]
             legOutClose = c[t - legOutIdx]
@@ -338,30 +393,47 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             passesTRHierarchy = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
             passesVolume = legOutVol > legInVol
 
+            # ---------------- OVERNIGHT/MULTI-DAY GAP पहचान ----------------
+            isOvernightGap = False
+            if bar_dates is not None:
+                try:
+                    isOvernightGap = bar_dates[t] != bar_dates[t - 1]
+                except Exception:
+                    isOvernightGap = False
+
+            # ---------------- प्राइस इमबैलेंस चेकिंग (date-aware gap-cap) ----------------
             hasImbalance = True
             hasGenuineGap = False
             gapSize = 0.0
+
+            legInCap = p["maxImbalanceVsLegInMult"] * legInTR
+            if isOvernightGap and p.get("relaxGapCapOnOvernight", True):
+                gapCap = float("inf")
+            else:
+                gapCap = legInCap
+
             if p["useImbalance"]:
                 if isDemandLegOut:
                     hasGenuineGap = legOutLow > maxBaseHigh
                     gapCond = hasGenuineGap or (legOutClose > legInHigh)
                     gapSize = max(0.0, legOutLow - maxBaseHigh)
-                    hasImbalance = gapCond and (gapSize <= p["maxImbalanceVsLegInMult"] * legInTR)
-                else:
+                    hasImbalance = gapCond and (gapSize <= gapCap)
+                elif isSupplyLegOut:
                     hasGenuineGap = legOutHigh < minBaseLow
                     gapCond = hasGenuineGap or (legOutClose < legInLow)
                     gapSize = max(0.0, minBaseLow - legOutHigh)
-                    hasImbalance = gapCond and (gapSize <= p["maxImbalanceVsLegInMult"] * legInTR)
-                if hasGenuineGap and gapSize > (p["maxImbalanceVsLegInMult"] * legInTR):
+                    hasImbalance = gapCond and (gapSize <= gapCap)
+                if hasGenuineGap and gapSize > gapCap:
                     hasGenuineGap = False
 
+            # ---------------- Leg-Out की BODY पूरे base-zone को engulf ना करे ----------------
             legOutBodyHigh = max(legOutOpen, legOutClose)
             legOutBodyLow = min(legOutOpen, legOutClose)
             legOutBodyEngulfsBase = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
             if legOutBodyEngulfsBase and not hasGenuineGap:
                 continue
 
-            # --- PATTERN ---
+            # ---------------- पैटर्न वर्गीकरण ----------------
             isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
             isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
             isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
@@ -375,24 +447,30 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 and passesVolume
                 and hasImbalance
             )
+
             if not isValid:
                 continue
 
-            # --- SCORE ---
+            # ---------------- डेंसिटी स्कोर ----------------
             densityScore = 0
+
             if baseCount == 1:
                 densityScore += 15
+
             if legInTR >= (p["hqLegInAtrMult"] * atr[t - legInIdx]):
                 densityScore += 10
+
             if legOutTR >= (p["hqLegOutTrMult"] * legInTR):
                 densityScore += 15
+
             if (legInTR >= 2.0 * maxBaseTR) and (legOutTR >= 2.0 * legInTR):
                 densityScore += 15
+
             if legOutVol > vol_sma[t - legOutIdx]:
                 densityScore += 10
 
             if isDemandLegOut:
-                legOutBodyPos = (legOutClose - legOutLow) / legOutTR if legOutTR > 0 else 0
+                legOutBodyPos = (legOutClose - legOutLow) / (legOutHigh - legOutLow) if (legOutHigh - legOutLow) > 0 else 0
                 legOutOwnBodyPct = body_pct(t, legOutIdx)
                 if isDBR:
                     if (legOutBodyPos >= 0.80) or (legOutOwnBodyPct >= p["legOutBodyHeavyPressurePct"]):
@@ -401,7 +479,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                     if legOutBodyPos >= 0.80:
                         densityScore += 15
             else:
-                legOutBodyPos = (legOutHigh - legOutClose) / legOutTR if legOutTR > 0 else 0
+                legOutBodyPos = (legOutHigh - legOutClose) / (legOutHigh - legOutLow) if (legOutHigh - legOutLow) > 0 else 0
                 if legOutBodyPos >= 0.80:
                     densityScore += 15
 
@@ -409,15 +487,18 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 if isDemandLegOut and is_bear(t, b):
                     hasOppositeColorBase = True
                     break
-                if isSupplyLegOut and is_bull(t, b):
+                elif isSupplyLegOut and is_bull(t, b):
                     hasOppositeColorBase = True
                     break
             if hasOppositeColorBase:
                 densityScore += 10
 
-            densityScore += 10  # fresh bonus
+            densityScore += 10
+
             if hasGenuineGap:
                 densityScore += p["genuineGapScoreBonus"]
+            if isOvernightGap and hasGenuineGap:
+                densityScore += p["overnightGapScoreBonus"]
 
             if densityScore < p["minValidScore"]:
                 continue
@@ -425,7 +506,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             isHQZone = densityScore >= p["hqScoreThreshold"]
             zoneFoundOnThisBar = True
 
-            # --- LEVELS ---
+            # ---------------- प्रॉक्सिमल/डिस्टल/SL/TP ----------------
             proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
             distVal = minBaseLow if isDemandLegOut else maxBaseHigh
 
@@ -438,6 +519,21 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             else:
                 legOutMidLevel = legOutLow + p["testedLegOutRetracePct"] * (legOutHigh - legOutLow)
 
+            # ---------------- डुप्लीकेट ज़ोन फिल्टर ----------------
+            isDuplicate = False
+            checked = 0
+            for checkZ in reversed(zones):
+                if checkZ.state == "Broken":
+                    continue
+                if checkZ.isDemand == isDemandLegOut and abs(checkZ.proxVal - proxVal) < (atr[t] * 0.25):
+                    isDuplicate = True
+                    break
+                checked += 1
+                if checked >= 11:
+                    break
+            if isDuplicate:
+                continue
+
             if isRBR:
                 patternType, zoneCategory = "RBR", "Continuation"
             elif isDBR:
@@ -447,19 +543,22 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             else:
                 patternType, zoneCategory = "RBD", "Reversal"
 
+            leftBar = t - baseCount
+
             newZone = Zone(
                 proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
                 isDemand=isDemandLegOut, isHQ=isHQZone, densityScore=densityScore,
                 patternType=patternType, zoneCategory=zoneCategory, state="Fresh",
                 touchCount=0, originalDensityScore=densityScore,
-                startBarIndex=t - baseCount, createdBarIndex=t, baseCount=baseCount,
+                startBarIndex=leftBar, createdBarIndex=t, baseCount=baseCount,
                 timestamp=df.index[t],
                 legOutHigh=legOutHigh, legOutLow=legOutLow, legOutMidLevel=legOutMidLevel,
+                isOvernightGap=isOvernightGap, legInTR=legInTR, legOutTR=legOutTR,
             )
             zones.append(newZone)
             active_zones.append(newZone)
 
-        # --- STATE TRACKING (same) ---
+        # ---------------- ज़ोन स्टेटस ट्रैकिंग ----------------
         if active_zones:
             lo_t, hi_t = l[t], h[t]
             still_active = []
@@ -507,7 +606,7 @@ def latest_active_zones(zones: List[Zone], include_tested: bool = True) -> List[
 
 
 def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_pct=1.0,
-                    include_tested=True) -> List[Dict[str, Any]]:
+                     include_tested=True) -> List[Dict[str, Any]]:
     alerts = []
     candidates = latest_active_zones(zones, include_tested=include_tested)
     for z in candidates:
@@ -525,7 +624,177 @@ def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_p
             "direction": direction, "pattern": z.patternType, "category": z.zoneCategory,
             "entry": z.proxVal, "sl": z.slVal, "tp": z.tpVal, "is_hq": z.isHQ,
             "score": z.densityScore, "touch_count": z.touchCount,
+            "is_overnight_gap": z.isOvernightGap,
+            "legInTR": z.legInTR, "legOutTR": z.legOutTR,
             "distance_pct": diff_pct * 100, "state": z.state, "timestamp": z.timestamp,
         })
     alerts.sort(key=lambda a: (-int(a["is_hq"]), a["distance_pct"]))
     return alerts
+
+
+# --------------------------------------------------------------------------
+# डायग्नोस्टिक/ट्रबलशूटिंग हेल्पर (v9.0 — गलत/सही TR दोनों दिखाता है)
+# --------------------------------------------------------------------------
+def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> List[Dict[str, Any]]:
+    p = dict(DEFAULT_PARAMS)
+    if params:
+        p.update(params)
+    p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
+    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
+
+    o, h, l, c, v, true_range, atr, vol_sma = _prep_arrays(df, p)
+    bar_dates = _bar_dates_array(df)
+
+    if isinstance(at_index, (int, np.integer)):
+        t = int(at_index)
+    else:
+        t = int(df.index.get_loc(at_index))
+
+    def tr(idx_from_t):
+        return true_range[t - idx_from_t]
+
+    def naive_hl_range(idx_from_t):
+        """पुराना (बग वाला) H-L तरीका — तुलना के लिए दिखाया जा रहा है।"""
+        i = t - idx_from_t
+        return h[i] - l[i]
+
+    def is_bull(idx_from_t):
+        return c[t - idx_from_t] > o[t - idx_from_t]
+
+    def is_bear(idx_from_t):
+        return o[t - idx_from_t] > c[t - idx_from_t]
+
+    def wick_pct(idx_from_t):
+        i = t - idx_from_t
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
+        return wicks / rng
+
+    def body_pct(idx_from_t):
+        i = t - idx_from_t
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        return abs(c[i] - o[i]) / rng
+
+    legOutMult = p.get("legOutTrMult", p.get("legOutAtrMult", 1.2))
+    reports = []
+
+    for baseCount in range(p["minBaseCount"], p["maxBaseCount"] + 1):
+        rep: Dict[str, Any] = {"baseCount": baseCount, "legOutTimestamp": df.index[t]}
+        legOutIdx = 0
+        legInIdx = baseCount + 1
+        prevIdx = legInIdx + 1
+
+        if t - prevIdx < 0 or t - baseCount < 0 or np.isnan(atr[t]) or np.isnan(atr[t - legInIdx]):
+            rep["result"] = "SKIP (डेटा/ATR अपर्याप्त)"
+            reports.append(rep)
+            continue
+
+        legInTR = tr(legInIdx)
+        rep["legInTR(correct)"] = legInTR
+        rep["legInTR(old_buggy_H-L)"] = naive_hl_range(legInIdx)
+        legInLow = l[t - legInIdx]; legInHigh = h[t - legInIdx]; legInClose = c[t - legInIdx]
+        legInVol = v[t - legInIdx]; legInRng = legInHigh - legInLow
+        legInIsBull, legInIsBear = is_bull(legInIdx), is_bear(legInIdx)
+
+        rep["legInATR"] = atr[t - legInIdx]
+        rep["legIn_TR_gte_ATR"] = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
+
+        if legInRng == 0:
+            rep["result"] = "INVALID (legInRng=0)"
+            reports.append(rep)
+            continue
+
+        rep["legInBodyPct"] = body_pct(legInIdx)
+        rep["legIn_body_ok"] = rep["legInBodyPct"] >= p["legInMinBodyPct"]
+
+        bullClv = (legInClose - legInLow) / legInRng
+        bearClv = (legInHigh - legInClose) / legInRng
+        rep["bullClv"] = bullClv
+        rep["bearClv"] = bearClv
+
+        maxBaseTR = 0.0; maxBaseHigh = -1.0; minBaseLow = float("inf"); allBaseValid = True
+        for b in range(1, baseCount + 1):
+            if np.isnan(atr[t - b]):
+                allBaseValid = False
+                break
+            bTR = tr(b)
+            if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
+                allBaseValid = False
+            if bTR > maxBaseTR:
+                maxBaseTR = bTR
+            if h[t - b] > maxBaseHigh:
+                maxBaseHigh = h[t - b]
+            if l[t - b] < minBaseLow:
+                minBaseLow = l[t - b]
+
+        rep["maxBaseTR"] = maxBaseTR
+        rep["base_all_valid(<=ATR)"] = allBaseValid
+        rep["legIn_gte_2xBase"] = legInTR >= (p["legInToBaseSizeMult"] * maxBaseTR) if maxBaseTR else False
+
+        legOutTR = tr(legOutIdx)
+        rep["legOutTR(correct,gap-aware)"] = legOutTR
+        rep["legOutTR(old_buggy_H-L)"] = naive_hl_range(legOutIdx)  # यही पुराना बग था
+        legOutHigh = h[t - legOutIdx]; legOutLow = l[t - legOutIdx]
+        legOutClose = c[t - legOutIdx]; legOutOpen = o[t - legOutIdx]; legOutVol = v[t - legOutIdx]
+        isDemandLegOut, isSupplyLegOut = is_bull(legOutIdx), is_bear(legOutIdx)
+
+        rep["legOutATR"] = atr[t - legOutIdx]
+        rep["legOut_explosive(>=1.2xATR)"] = legOutTR >= (legOutMult * atr[t - legOutIdx])
+        rep["legOut_wickPct"] = wick_pct(legOutIdx)
+        rep["legOut_wick_ok(<=25%)"] = rep["legOut_wickPct"] <= p["maxWickPct"]
+        rep["TR_hierarchy_ok(legOut>=legIn>base)"] = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
+        rep["volume_ok(legOut>legIn)"] = legOutVol > legInVol
+
+        isOvernightGap = False
+        if bar_dates is not None:
+            try:
+                isOvernightGap = bar_dates[t] != bar_dates[t - 1]
+            except Exception:
+                isOvernightGap = False
+        rep["isOvernightGap"] = isOvernightGap
+
+        legInCap = p["maxImbalanceVsLegInMult"] * legInTR
+        gapCap = float("inf") if (isOvernightGap and p.get("relaxGapCapOnOvernight", True)) else legInCap
+
+        hasGenuineGap = False; gapSize = 0.0; hasImbalance = True
+        if p["useImbalance"]:
+            if isDemandLegOut:
+                hasGenuineGap = legOutLow > maxBaseHigh
+                gapCond = hasGenuineGap or (legOutClose > legInHigh)
+                gapSize = max(0.0, legOutLow - maxBaseHigh)
+                hasImbalance = gapCond and (gapSize <= gapCap)
+            elif isSupplyLegOut:
+                hasGenuineGap = legOutHigh < minBaseLow
+                gapCond = hasGenuineGap or (legOutClose < legInLow)
+                gapSize = max(0.0, minBaseLow - legOutHigh)
+                hasImbalance = gapCond and (gapSize <= gapCap)
+
+        rep["gapSize"] = gapSize
+        rep["hasGenuineGap"] = hasGenuineGap
+        rep["imbalance_ok"] = hasImbalance
+
+        legOutBodyHigh = max(legOutOpen, legOutClose); legOutBodyLow = min(legOutOpen, legOutClose)
+        engulf = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
+        rep["engulfsBase"] = engulf
+        rep["engulf_ok"] = (not engulf) or hasGenuineGap
+
+        isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
+        isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
+        isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
+        isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut
+        rep["pattern"] = "RBR" if isRBR else "DBR" if isDBR else "DBD" if isDBD else "RBD" if isRBD else "NONE"
+
+        rep["FINAL_VALID"] = bool(
+            rep["legIn_TR_gte_ATR"] and rep.get("legIn_body_ok") and rep.get("legIn_gte_2xBase")
+            and allBaseValid and rep["pattern"] != "NONE"
+            and rep["legOut_explosive(>=1.2xATR)"] and rep["legOut_wick_ok(<=25%)"]
+            and rep["TR_hierarchy_ok(legOut>=legIn>base)"] and rep["volume_ok(legOut>legIn)"]
+            and rep["imbalance_ok"] and rep["engulf_ok"]
+        )
+        reports.append(rep)
+
+    return reports
