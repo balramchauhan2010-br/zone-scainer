@@ -64,7 +64,7 @@ FULL VALIDATION (v9.0)
   LEG-OUT:
     - correct direction
     - Explosive: TR >= 1.2 x ATR (अब gap-aware TR)
-    - Wick % <= 25% (candle की अपनी H-L रेंज पर आधारित)
+    - Wick % <= 35% (candle की अपनी H-L रेंज पर आधारित)
     - TR Hierarchy: LegOut >= LegIn > MaxBaseTR
     - Volume: Volume[legOut] > Volume[legIn]
     - Leg-Out की सिर्फ़ BODY पूरे base-zone को engulf ना करे (genuine gap हो तो OK)
@@ -101,7 +101,7 @@ DEFAULT_PARAMS = dict(
     hqLegOutTrMult=2.0,
     hqLegInAtrMult=1.5,
     maxBaseAtrMult=1.0,
-    maxWickPct=0.40,
+    maxWickPct=0.25,
 
     minBaseCount=1,
     maxBaseCount=3,
