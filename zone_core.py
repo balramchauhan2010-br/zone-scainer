@@ -53,6 +53,16 @@ v8.4 से v8.5 में क्या नया जोड़ा/बदला �
      जोड़ दिए गए हैं ताकि यह स्तर हर candle पर दोबारा-दोबारा ना निकालना पड़े (ज़ोन बनते
      वक़्त एक बार calculate करके स्टोर कर लिया जाता है)।
 
+  D) FIXED (v8.6) — "Leg-Out की BODY पूरे base-zone को engulf ना करे" वाला नियम पहले
+     bina शर्त लागू होता था, जिससे बहुत बड़ी explosive legOut कैंडल (उदाहरण: ICICI Bank
+     1h, legOut TR=35 बनाम base TR सिर्फ़ 6.60, जिसमें असल में साफ़ white-area/gap भी
+     मौजूद था) गलती से reject हो जाती थी। असली मक़सद यह देखना था कि base और legOut के
+     बीच सच में white area (गैप) बचा है या नहीं — ना कि किसकी TR बड़ी/छोटी है। अब नियम:
+     अगर base और legOut के बीच genuine gap (white area) मौजूद है, तो legOut की body भले
+     ही पूरे base को (wick सहित) ढक ले, फिर भी zone invalid नहीं होगी — क्योंकि गैप खुद
+     साबित करता है कि leftover orders बचे हैं। Engulf सिर्फ़ तभी invalid करेगा जब gap
+     बिल्कुल ना हो (यानी धीमी, ओवरलैपिंग चाल से base निगला गया हो)।
+
   (v8.3/v8.4 में पहले से मौजूद और बिना बदलाव के रखे गए नियम):
     - "Leg-In का TR, ATR से बड़ा हो + छोटी wick हो इतना ही काफी है"
     - "Base कैंडल में सबसे बड़ा जिस base कैंडल का TR बड़ा हो, वो ATR से छोटा हो": maxBaseAtrMult चेक से लागू है।
@@ -433,20 +443,12 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             passesTRHierarchy = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
             passesVolume = legOutVol > legInVol                                  # LegOut का वॉल्यूम LegIn से अधिक हो
 
-            # ---------------- Leg-Out की BODY पूरे base-zone को engulf ना करे ----------------
-            # अगर सिर्फ़ leg-out candle की body (wick छोड़कर) ही base zone की पूरी रेंज
-            # (maxBaseHigh से minBaseLow तक, wick सहित) को ऊपर-नीचे दोनों तरफ़ से पूरी तरह
-            # ढक/निगल लेती है, तो zone invalid मानी जाती है। सिर्फ़ leg-out की WICK cover
-            # करने पर zone मान्य रहती है।
-            legOutBodyHigh = max(legOutOpen, legOutClose)
-            legOutBodyLow = min(legOutOpen, legOutClose)
-            legOutBodyEngulfsBase = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
-            if legOutBodyEngulfsBase:
-                continue  # leg-out ki body ne poore base zone (wick sahit) ko nigal liya -> invalid
-
             # ---------------- प्राइस इमबैलेंस चेकिंग (gap-size limit सहित) ----------------
+            # [FIXED v8.6] इसे engulf-चेक से पहले निकाला ताकि नीचे engulf-चेक में यह पता चल
+            # सके कि असली gap मौजूद है या नहीं (ICICI Bank जैसे बड़े explosive legOut के लिए ज़रूरी)।
             hasImbalance = True
             hasGenuineGap = False  # NEW (v8.5): सिर्फ़ असली gap (close-based नहीं) — स्कोरिंग बोनस के लिए
+            gapSize = 0.0
             if p["useImbalance"]:
                 if isDemandLegOut:
                     # डिमांड: Leg-Out Low बेस High से ऊपर हो या Close Leg-In High से ऊपर हो
@@ -466,6 +468,28 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 # नहीं गिनते (अनियंत्रित/बहुत बड़ा gap भरोसेमंद संकेत नहीं है)
                 if hasGenuineGap and gapSize > (p["maxImbalanceVsLegInMult"] * legInTR):
                     hasGenuineGap = False
+
+            # ---------------- [FIXED v8.6] Leg-Out की BODY पूरे base-zone को engulf ना करे ----------------
+            # इस नियम का असली मक़सद यह देखना है कि base कैंडल और leg-out कैंडल के बीच सचमुच
+            # कोई "white area" (गैप) बचा है या नहीं — यह TR के साइज़ (कौन बड़ा/छोटा है) से तय
+            # नहीं होता, बल्कि सिर्फ़ price-levels से तय होता है: legOut की BODY (Open-Close),
+            # base की पूरी रेंज (wick सहित, यानी maxBaseHigh से minBaseLow तक) को ऊपर-नीचे दोनों
+            # तरफ़ से पूरी तरह ढक/निगल लेती है या नहीं।
+            #   - अगर base और legOut के बीच सच में white area/gap है (hasGenuineGap, नीचे उसी
+            #     price-level तरीके से निकाला गया है: legOutLow > maxBaseHigh, या इसका उल्टा
+            #     Supply में) — तो engulf होने पर भी zone INVALID नहीं होगी, क्योंकि गैप खुद ही
+            #     साबित करता है कि base के ऑर्डर पूरी तरह consume नहीं हुए (leftover orders बचे)।
+            #   - अगर कोई white area/gap नहीं है (legOut और base के बीच सीधा overlap है) AND
+            #     फिर भी legOut की BODY पूरे base को निगल लेती है — तभी zone INVALID होगी,
+            #     क्योंकि तब यह धीमी/ओवरलैपिंग चाल है, स्पष्ट leftover ऑर्डर का सबूत नहीं।
+            # पहले यह चेक gap-status देखे बिना ही हमेशा लागू होता था, जिससे बहुत बड़ी explosive
+            # legOut कैंडल (जैसे ICICI Bank उदाहरण: legOut TR=35 बनाम base TR सिर्फ़ 6.60,
+            # जिसमें असल में साफ़ gap भी मौजूद था) गलती से reject हो जाती थी।
+            legOutBodyHigh = max(legOutOpen, legOutClose)
+            legOutBodyLow = min(legOutOpen, legOutClose)
+            legOutBodyEngulfsBase = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
+            if legOutBodyEngulfsBase and not hasGenuineGap:
+                continue  # gap नहीं है AND body ने पूरा base निगल लिया -> invalid
 
             # ---------------- पैटर्न वर्गीकरण (Pattern Classification) ----------------
             isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut  # Rally-Base-Rally
