@@ -101,7 +101,7 @@ DEFAULT_PARAMS = dict(
     hqLegOutTrMult=2.0,
     hqLegInAtrMult=1.5,
     maxBaseAtrMult=1.0,
-    maxWickPct=0.25,
+    maxWickPct=0.30,
 
     minBaseCount=1,
     maxBaseCount=3,
@@ -745,7 +745,7 @@ def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> L
         rep["legOutATR"] = atr[t - legOutIdx]
         rep["legOut_explosive(>=1.2xATR)"] = legOutTR >= (legOutMult * atr[t - legOutIdx])
         rep["legOut_wickPct"] = wick_pct(legOutIdx)
-        rep["legOut_wick_ok(<=25%)"] = rep["legOut_wickPct"] <= p["maxWickPct"]
+        rep["legOut_wick_ok(<=30%)"] = rep["legOut_wickPct"] <= p["maxWickPct"]
         rep["TR_hierarchy_ok(legOut>=legIn>base)"] = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
         rep["volume_ok(legOut>legIn)"] = legOutVol > legInVol
 
@@ -791,7 +791,7 @@ def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> L
         rep["FINAL_VALID"] = bool(
             rep["legIn_TR_gte_ATR"] and rep.get("legIn_body_ok") and rep.get("legIn_gte_2xBase")
             and allBaseValid and rep["pattern"] != "NONE"
-            and rep["legOut_explosive(>=1.2xATR)"] and rep["legOut_wick_ok(<=25%)"]
+            and rep["legOut_explosive(>=1.2xATR)"] and rep["legOut_wick_ok(<=30%)"]
             and rep["TR_hierarchy_ok(legOut>=legIn>base)"] and rep["volume_ok(legOut>legIn)"]
             and rep["imbalance_ok"] and rep["engulf_ok"]
         )
