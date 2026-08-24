@@ -1,8 +1,11 @@
 """
-Zone Detection Engine — Python Port of Pine Script v6 "Zone" Indicator
+zone_core.py
 ========================================================================
-मूल Pine Script लॉजिक (rules/conditions/thresholds) बिल्कुल वैसा ही रखा गया है।
-सिर्फ conversion-bugs (नीचे टिप्पणियों में BUGFIX के साथ marked) ठीक किए गए हैं।
+Pine Script v6 "Zone" Indicator ka Python port.
+Rules/Conditions/Thresholds bilkul same rakhe gaye hain.
+Streamlit app (app.py) yahi file import karta hai:
+    from zone_core import scan_zones, latest_active_zones, DEFAULT_PARAMS
+========================================================================
 """
 
 from dataclasses import dataclass, field
@@ -16,8 +19,8 @@ import numpy as np
 # ==============================================================================
 @dataclass
 class Params:
-    accountCapital: float = 25000.0          # NOTE: original Pine script me bhi unused hai (dead input) — preserved as-is
-    riskPct: float = 0.5                     # NOTE: unused in original logic — preserved as-is
+    accountCapital: float = 25000.0          # original Pine me bhi unused hai (preserved)
+    riskPct: float = 0.5                     # unused in original logic (preserved)
     targetRR: float = 5.0
     slBufferAtr: float = 0.1
 
@@ -38,8 +41,8 @@ class Params:
     legInMinBodyPct: float = 0.60
 
     useImbalance: bool = True
-    maxImbalanceMult: float = 1.0            # NOTE: unused in original logic — preserved as-is
-    relaxGapCapOvernight: bool = True        # NOTE: unused in original logic — preserved as-is
+    maxImbalanceMult: float = 1.0            # unused in original logic (preserved)
+    relaxGapCapOvernight: bool = True        # unused in original logic (preserved)
     genuineGapBonus: int = 10
     overnightGapBonus: int = 15
     rejectOppositeCoverPct: float = 0.50
@@ -59,6 +62,10 @@ class Params:
     def __post_init__(self):
         self.minBaseCount = max(1, min(self.minBaseCountInput, self.maxBaseCountInput))
         self.maxBaseCount = min(self.maxBaseCountInput, self.HARD_MAX_BASE_COUNT)
+
+
+# app.py isi naam se import karta hai
+DEFAULT_PARAMS = Params()
 
 
 # ==============================================================================
@@ -86,7 +93,6 @@ class Zone:
     isOvernight: bool
     legInTR: float
     legOutTR: float
-    # box.new() ka equivalent (Pine "box" object ki jagah simple coords)
     box_left: int
     box_right: int
     box_top: float
@@ -96,15 +102,11 @@ class Zone:
 
 
 # ==============================================================================
-# 2. HELPER: ta.rma / ta.sma (BUGFIX: exact Pine semantics)
+# 2. HELPERS: ta.rma / ta.sma (exact Pine semantics)
 # ==============================================================================
-def compute_rma(series: np.ndarray, length: int) -> List[Optional[float]]:
-    """Pine ta.rma(src, length) ka exact formula:
-       rma[i] = na(rma[i-1]) ? sma(src,length)[i] : (rma[i-1]*(length-1)+src[i])/length
-    """
+def _compute_rma(series: np.ndarray, length: int) -> List[Optional[float]]:
     n = len(series)
     result: List[Optional[float]] = [None] * n
-    running_sum = 0.0
     for i in range(n):
         if i < length - 1:
             result[i] = None
@@ -115,7 +117,7 @@ def compute_rma(series: np.ndarray, length: int) -> List[Optional[float]]:
     return result
 
 
-def compute_sma(series: np.ndarray, length: int) -> List[Optional[float]]:
+def _compute_sma(series: np.ndarray, length: int) -> List[Optional[float]]:
     n = len(series)
     result: List[Optional[float]] = [None] * n
     for i in range(n):
@@ -127,14 +129,13 @@ def compute_sma(series: np.ndarray, length: int) -> List[Optional[float]]:
 
 
 # ==============================================================================
-# 3. MAIN SCANNING ENGINE
+# 3. MAIN SCANNING ENGINE  -> scan_zones()
 # ==============================================================================
-def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List[float]]:
+def scan_zones(df: pd.DataFrame, params: Params = DEFAULT_PARAMS) -> Tuple[List[Zone], List[float]]:
     """
     df: columns ['open','high','low','close','volume'] required.
-        Index must be a DatetimeIndex (ya 'time' column ho) — overnight-gap
-        detection ke liye zaroori hai.
-    Return: (active_zones list, close-price list [safety plot ke barabar])
+        Index DatetimeIndex ho ya 'time' column ho (overnight-gap detection ke liye).
+    Return: (all_zones_list, close_prices_list)
     """
     if not isinstance(df.index, pd.DatetimeIndex):
         if 'time' in df.columns:
@@ -162,8 +163,8 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
             tr = max(tr, abs(hi[i] - cl[i - 1]), abs(lo[i] - cl[i - 1]))
         current_tr[i] = tr
 
-    atr_val = compute_rma(current_tr, params.atrPeriod)
-    vol_sma = compute_sma(vol, params.volSmaPeriod)
+    atr_val = _compute_rma(current_tr, params.atrPeriod)
+    vol_sma = _compute_sma(vol, params.volSmaPeriod)
 
     def is_overnight_gap(i: int) -> bool:
         if i == 0:
@@ -181,7 +182,6 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
     for i in range(n):
         closes_plot.append(cl[i])
 
-        # ---- Per-bar helper closures (BUGFIX: bounds-checked, na()-safe) ----
         def pos_of(idx: int) -> int:
             return i - idx
 
@@ -189,7 +189,7 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
             p = pos_of(idx)
             if p < 0:
                 return 0.0
-            if p == 0:                       # BUGFIX: no previous close available
+            if p == 0:
                 return hi[p] - lo[p]
             prev_close = cl[p - 1]
             return max(hi[p] - lo[p], abs(hi[p] - prev_close), abs(lo[p] - prev_close))
@@ -222,7 +222,7 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
             return max(op[p], cl[p]), min(op[p], cl[p])
 
         # ==================================================================
-        # SECTION 4: SCANNING ENGINE
+        # SCANNING ENGINE
         # ==================================================================
         if i >= min_start and atr_val[i] is not None:
             zoneFoundOnThisBar = False
@@ -236,10 +236,9 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 prevIdx = legInIdx + 1
 
                 posLegIn = i - legInIdx
-                if posLegIn < 0 or atr_val[posLegIn] is None:      # BUGFIX bounds-check
+                if posLegIn < 0 or atr_val[posLegIn] is None:
                     continue
 
-                # ---------------- LEG-IN ----------------
                 legInTR = TR(legInIdx)
                 posLI = pos_of(legInIdx)
                 legInLow = lo[posLI]
@@ -255,7 +254,7 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                     continue
 
                 posPrev = pos_of(prevIdx)
-                if posPrev < 0:                                    # BUGFIX bounds-check
+                if posPrev < 0:
                     continue
 
                 prevIsBull = is_bull(prevIdx)
@@ -276,7 +275,6 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 bullClv = (legInClose - legInLow) / legInRng
                 bearClv = (legInHigh - legInClose) / legInRng
 
-                # ---------------- BASE ----------------
                 allBaseValid = True
                 maxBaseTR = 0.0
                 maxBaseHigh = -1.0
@@ -284,7 +282,7 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
 
                 for b in range(1, bCount + 1):
                     posB = pos_of(b)
-                    if posB < 0 or atr_val[posB] is None:          # BUGFIX bounds-check
+                    if posB < 0 or atr_val[posB] is None:
                         allBaseValid = False
                         break
                     bTR = TR(b)
@@ -301,7 +299,6 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 if not allBaseValid or maxBaseTR == 0:
                     continue
 
-                # 1 base candle -> 1.5x, otherwise default multiplier
                 effectiveBaseSizeMult = 1.5 if bCount == 1 else params.legInToBaseSizeMult
                 if legInTR < (effectiveBaseSizeMult * maxBaseTR):
                     continue
@@ -310,8 +307,7 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 if not validLegIn:
                     continue
 
-                # ---------------- LEG-OUT ----------------
-                posLO = pos_of(legOutIdx)  # == i
+                posLO = pos_of(legOutIdx)
                 legOutTR = TR(legOutIdx)
                 legOutHigh = hi[posLO]
                 legOutLow = lo[posLO]
@@ -332,24 +328,19 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
 
                 isOvernight = is_overnight_gap(i)
 
-                # ---------------- IMBALANCE & GAP ----------------
                 hasImbalance = True
                 hasGenuineGap = False
-                gapSize = 0.0
 
                 if params.useImbalance:
                     if isDemandLegOut:
                         hasGenuineGap = legOutLow > maxBaseHigh
                         gapCond = hasGenuineGap or (legOutClose > legInHigh)
-                        gapSize = max(0.0, legOutLow - maxBaseHigh)
                         hasImbalance = gapCond
                     elif isSupplyLegOut:
                         hasGenuineGap = legOutHigh < minBaseLow
                         gapCond = hasGenuineGap or (legOutClose < legInLow)
-                        gapSize = max(0.0, minBaseLow - legOutHigh)
                         hasImbalance = gapCond
 
-                # ---------------- ENGULF CHECK ----------------
                 legOutBodyHigh = max(legOutOpen, legOutClose)
                 legOutBodyLow = min(legOutOpen, legOutClose)
                 legOutBodyEngulfsBase = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
@@ -357,7 +348,6 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 if legOutBodyEngulfsBase and not hasGenuineGap:
                     continue
 
-                # ---------------- CLASSIFICATION ----------------
                 isRBR = legInIsBull and (bullClv >= params.minClvPct) and isDemandLegOut
                 isDBR = legInIsBear and (bearClv >= params.minClvPct) and isDemandLegOut
                 isDBD = legInIsBear and (bearClv >= params.minClvPct) and isSupplyLegOut
@@ -375,22 +365,16 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 if not isValid:
                     continue
 
-                # ---------------- SCORING ----------------
                 densityScore = 0
-
                 if bCount == 1:
                     densityScore += 15
-
                 if legInTR >= (params.hqLegInAtrMult * atr_val[posLI]):
                     densityScore += 10
-
                 if legOutTR >= (params.hqLegOutTrMult * legInTR):
                     densityScore += 15
-
                 if (legInTR >= 2.0 * maxBaseTR) and (legOutTR >= 2.0 * legInTR):
                     densityScore += 15
-
-                if vol_sma[posLO] is not None and legOutVol > vol_sma[posLO]:   # BUGFIX: None-safe compare
+                if vol_sma[posLO] is not None and legOutVol > vol_sma[posLO]:
                     densityScore += 10
 
                 if isDemandLegOut:
@@ -434,7 +418,6 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 isHQZone = densityScore >= params.hqScoreThreshold
                 zoneFoundOnThisBar = True
 
-                # ---------------- ZONE LEVELS ----------------
                 proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
                 distVal = minBaseLow if isDemandLegOut else maxBaseHigh
 
@@ -449,11 +432,10 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                     if isDemandLegOut else \
                     (legOutLow + params.testedLegOutRetracePct * (legOutHigh - legOutLow))
 
-                # ---------------- DUPLICATE CHECK ----------------
                 isDuplicate = False
                 checked = 0
                 if len(active_zones) > 0:
-                    for idxz in range(len(active_zones) - 1, -1, -1):   # BUGFIX: correct reverse loop
+                    for idxz in range(len(active_zones) - 1, -1, -1):
                         checkZ = active_zones[idxz]
                         if checkZ.state == "Broken":
                             continue
@@ -471,7 +453,7 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 zoneCat = "Continuation" if (isRBR or isDBD) else "Reversal"
 
                 boxBorderColor = "green" if isDemandLegOut else "red"
-                boxFillColor = "green_light85" if isDemandLegOut else "red_light85"
+                boxFillColor = "rgba(0,255,0,0.15)" if isDemandLegOut else "rgba(255,0,0,0.15)"
 
                 newZone = Zone(
                     proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
@@ -485,9 +467,7 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                 )
                 active_zones.append(newZone)
 
-        # ==================================================================
-        # SECTION 5: ZONE STATE TRACKING & BOX UPDATES
-        # ==================================================================
+        # ---------------- STATE TRACKING (Fresh -> Tested -> Broken) ----------------
         if len(active_zones) > 0:
             lo_t = lo[i]
             hi_t = hi[i]
@@ -522,8 +502,8 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
                     z.state = "Broken"
 
                 if z.state == "Broken":
-                    z.box_bg_color = "gray_light95"
-                    z.box_border_color = "gray_light80"
+                    z.box_bg_color = "rgba(128,128,128,0.05)"
+                    z.box_border_color = "rgba(128,128,128,0.2)"
                 else:
                     z.box_right = i + 15
 
@@ -531,51 +511,31 @@ def run_zone_scanner(df: pd.DataFrame, params: Params) -> Tuple[List[Zone], List
 
 
 # ==============================================================================
-# 4. CONVENIENCE: Zones ko DataFrame me convert karna
+# 4. HELPER: app.py isko bhi import karta hai
 # ==============================================================================
+def latest_active_zones(zones: List[Zone], only_non_broken: bool = True) -> List[Zone]:
+    """Sabse latest (naye) zones sabse upar, chahe to sirf non-broken zones filter karein."""
+    filtered = [z for z in zones if (z.state != "Broken")] if only_non_broken else list(zones)
+    filtered.sort(key=lambda z: z.createdBarIndex, reverse=True)
+    return filtered
+
+
 def zones_to_dataframe(zones: List[Zone]) -> pd.DataFrame:
     rows = []
     for z in zones:
         rows.append({
-            "pattern": z.patternType,
-            "category": z.zoneCategory,
-            "isDemand": z.isDemand,
-            "isHQ": z.isHQ,
-            "score": z.densityScore,
-            "state": z.state,
-            "touchCount": z.touchCount,
-            "prox": z.proxVal,
-            "dist": z.distVal,
-            "sl": z.slVal,
-            "tp": z.tpVal,
-            "createdBar": z.createdBarIndex,
-            "startBar": z.startBarIndex,
-            "baseCount": z.baseCount,
+            "Pattern": z.patternType,
+            "Category": z.zoneCategory,
+            "Type": "Demand" if z.isDemand else "Supply",
+            "HQ": z.isHQ,
+            "Score": z.densityScore,
+            "State": z.state,
+            "Touches": z.touchCount,
+            "Proximal": round(z.proxVal, 2),
+            "Distal": round(z.distVal, 2),
+            "SL": round(z.slVal, 2),
+            "TP": round(z.tpVal, 2),
+            "CreatedBar": z.createdBarIndex,
+            "BaseCount": z.baseCount,
         })
     return pd.DataFrame(rows)
-
-
-# ==============================================================================
-# 5. USAGE EXAMPLE
-# ==============================================================================
-if __name__ == "__main__":
-    # Example: apna OHLCV CSV load karein (columns: time,open,high,low,close,volume)
-    # df = pd.read_csv("data.csv", parse_dates=["time"], index_col="time")
-
-    # ---- Demo ke liye synthetic data ----
-    rng = pd.date_range("2024-01-01 09:15", periods=500, freq="5min")
-    np.random.seed(42)
-    price = 100 + np.cumsum(np.random.randn(500) * 0.5)
-    df = pd.DataFrame({
-        "open": price + np.random.randn(500) * 0.1,
-        "high": price + abs(np.random.randn(500) * 0.3),
-        "low": price - abs(np.random.randn(500) * 0.3),
-        "close": price + np.random.randn(500) * 0.1,
-        "volume": np.random.randint(1000, 5000, 500),
-    }, index=rng)
-
-    params = Params()
-    zones, closes = run_zone_scanner(df, params)
-
-    print(f"Total Zones Found: {len(zones)}")
-    print(zones_to_dataframe(zones).tail(10))
