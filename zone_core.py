@@ -1,295 +1,620 @@
 # -*- coding: utf-8 -*-
 """
-app.py — Institutional D&S Zone Scanner (Streamlit UI)
-========================================================================
-zone_core.py (v9.0) ke saath 100% compatible.
-Root-cause bug fix: run_full_scan() ab HAMESHA ek FLAT List[Zone]
-return karta hai — chahe kitne bhi symbols scan ho rahe hon.
-(Pehle wala bug: multi-symbol loop me `zones` list ke andar
- list-of-list ya tuple ghus gaya tha, isliye z.state fail hota tha.)
-========================================================================
+zone_core.py — v9.0 (ROOT-CAUSE FIX: True Range अब हर जगह GAP-AWARE है)
+यह एक एडवांस्ड डिमांड और सप्लाई (D&S) ज़ोन डिटेक्शन इंजन है।
 """
-
-import time
+from dataclasses import dataclass
+from typing import List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
-import streamlit as st
 
-from zone_core import (
-    scan_zones,
-    latest_active_zones,
-    get_zone_alerts,
-    diagnose_bar,
-    DEFAULT_PARAMS,
-    Zone,
+DEFAULT_PARAMS = dict(
+    accountCapital=25000.0,
+    riskPct=0.5,
+    targetRR=5.0,
+    slBufferAtr=0.1,
+    atrPeriod=14,
+    volSmaPeriod=20,
+    legOutTrMult=1.2,
+    legOutMinTrRatio=1.0,
+    hqLegOutTrMult=2.0,
+    hqLegInAtrMult=1.5,
+    maxBaseAtrMult=1.0,
+    maxWickPct=0.30,
+    minBaseCount=1,
+    maxBaseCount=3,
+    legInMinAtrMult=1.0,
+    minClvPct=0.60,
+    legInToBaseSizeMult=2.0,
+    legInMinBodyPct=0.60,
+    useImbalance=True,
+    maxImbalanceVsLegInMult=1.0,
+    relaxGapCapOnOvernight=True,
+    genuineGapScoreBonus=10,
+    overnightGapScoreBonus=15,
+    rejectOppositeCoverPct=0.50,
+    minValidScore=40,
+    hqScoreThreshold=90,
+    legOutBodyHeavyPressurePct=0.60,
+    testedLegOutRetracePct=0.50,
+    maxTestedCount=2,
 )
 
-# yfinance optional — agar aapke paas Dhan/kisi aur source ka data hai
-# to fetch_data() function neeche replace kar sakte hain.
-try:
-    import yfinance as yf
-    _HAS_YFINANCE = True
-except Exception:
-    _HAS_YFINANCE = False
-
-st.set_page_config(page_title="Institutional D&S Zone Scanner", layout="wide")
-st.title("🏛️ Institutional D&S Zone Scanner")
-
-# ==============================================================================
-# 1. SIDEBAR — Watchlist & Timeframe
-# ==============================================================================
-st.sidebar.header("⚙️ सेटिंग्स")
-
-default_watchlist = "RELIANCE.NS, ONGC.NS, ICICIBANK.NS, BALRAMCHIN.NS, TCS.NS"
-watchlist_text = st.sidebar.text_area(
-    "Watchlist (comma-separated symbols)", value=default_watchlist, height=80
-)
-symbols = [s.strip().upper() for s in watchlist_text.split(",") if s.strip()]
-
-interval = st.sidebar.selectbox(
-    "Timeframe", ["5m", "15m", "30m", "1h", "1d"], index=1
-)
-period_map = {
-    "5m": "60d", "15m": "60d", "30m": "60d", "1h": "180d", "1d": "2y"
-}
-period = period_map.get(interval, "60d")
-
-st.sidebar.markdown("---")
-
-# ==============================================================================
-# 2. SIDEBAR — Advanced Zone Parameters (zone_core.DEFAULT_PARAMS se dynamic)
-# ==============================================================================
-with st.sidebar.expander("🔧 Advanced Zone Parameters", expanded=False):
-    user_params = {}
-    for key, default_val in DEFAULT_PARAMS.items():
-        if isinstance(default_val, bool):
-            user_params[key] = st.checkbox(key, value=default_val)
-        elif isinstance(default_val, int):
-            user_params[key] = st.number_input(key, value=int(default_val), step=1)
-        elif isinstance(default_val, float):
-            user_params[key] = st.number_input(key, value=float(default_val))
-        else:
-            user_params[key] = default_val
-
-st.sidebar.markdown("---")
-
-# ==============================================================================
-# 3. SIDEBAR — Filters
-# ==============================================================================
-st.sidebar.subheader("🎯 Filters")
-
-pattern_category = st.sidebar.selectbox(
-    "Pattern Category", ["सभी", "Continuation", "Reversal"], index=0
-)
-
-only_hq = st.sidebar.checkbox("⭐ सिर्फ HQ Zones (Score ≥ 75)", value=False)
-hq_min_score = 75
-
-only_near_price = st.sidebar.checkbox(
-    "🎯 सिर्फ Near-Price Zones (pending order likely)", value=False
-)
-near_price_pct = st.sidebar.slider(
-    "Near-Price threshold (%)", min_value=0.5, max_value=10.0, value=3.0, step=0.5
-)
-
-st.sidebar.markdown("---")
-
-# ==============================================================================
-# 4. SIDEBAR — Auto Refresh & Cache
-# ==============================================================================
-auto_refresh_min = st.sidebar.slider(
-    "Auto-Refresh (मिनट, 0 = बंद)", min_value=0.0, max_value=30.0, value=0.0, step=1.0
-)
-
-if st.sidebar.button("🗑️ Cache साफ करें (Force पूरा Rescan)"):
-    st.cache_data.clear()
-    st.sidebar.success("Cache साफ हो गया। अब 'Scan Zones' दबाएँ।")
-
-scan_clicked = st.sidebar.button("🔍 Scan Zones", type="primary", use_container_width=True)
-
-# ==============================================================================
-# 5. DATA FETCH (yfinance) — cached
-# ==============================================================================
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_data(symbol: str, interval: str, period: str) -> pd.DataFrame:
-    """
-    Ek symbol ke liye OHLCV data laata hai.
-    Agar aapke paas Dhan API hai to isi function ke andar
-    apna data-fetch logic replace kar dein — bas return value
-    columns ['open','high','low','close','volume'] + DatetimeIndex
-    honi chahiye.
-    """
-    if not _HAS_YFINANCE:
-        raise RuntimeError("yfinance install nahi hai. requirements.txt me add karein.")
-
-    df = yf.download(
-        symbol, period=period, interval=interval,
-        progress=False, auto_adjust=False
-    )
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    # yfinance columns ko lowercase me normalize karo
-    df = df.rename(columns={
-        "Open": "open", "High": "high", "Low": "low",
-        "Close": "close", "Volume": "volume"
-    })
-    df = df[["open", "high", "low", "close", "volume"]].dropna()
-    df.index = pd.to_datetime(df.index)
-    return df
+_HARD_MAX_BASE_COUNT = 3
 
 
-# ==============================================================================
-# 6. FULL SCAN — ROOT-CAUSE FIX: hamesha FLAT List[Zone] return karo
-# ==============================================================================
-@st.cache_data(ttl=300, show_spinner=True)
-def run_full_scan(symbols: list, interval: str, period: str, params: dict):
-    """
-    Multi-symbol scan.
-    ✅ FIX: 'zones' hamesha ek SEEDHI/FLAT list rahegi jisme sirf
-             Zone dataclass objects hon — koi nested list/tuple nahi.
-    Har Zone object me hum 'symbol' attribute manually attach karte
-    hain (dataclass frozen nahi hai, isliye setattr allowed hai).
-    """
-    all_zones: list = []          # <-- yehi woh list hai jo pehle corrupt ho rahi thi
-    errors: dict = {}
+@dataclass
+class Zone:
+    proxVal: float
+    distVal: float
+    slVal: float
+    tpVal: float
+    isDemand: bool
+    isHQ: bool
+    densityScore: int
+    patternType: str = ""
+    zoneCategory: str = ""
+    state: str = "Fresh"
+    touchCount: int = 0
+    originalDensityScore: int = 0
+    startBarIndex: int = 0
+    createdBarIndex: int = 0
+    baseCount: int = 0
+    timestamp: object = None
+    legOutHigh: float = 0.0
+    legOutLow: float = 0.0
+    legOutMidLevel: float = 0.0
+    isOvernightGap: bool = False
+    legInTR: float = 0.0
+    legOutTR: float = 0.0
 
-    for sym in symbols:
-        try:
-            df = fetch_data(sym, interval, period)
-            if df is None or df.empty or len(df) < 20:
-                errors[sym] = "डेटा उपलब्ध नहीं / बहुत कम bars"
+
+def _true_range(h, l, c):
+    n = len(h)
+    tr = np.empty(n)
+    tr[0] = h[0] - l[0]
+    if n > 1:
+        prev_close = c[:-1]
+        tr[1:] = np.maximum(
+            h[1:] - l[1:],
+            np.maximum(np.abs(h[1:] - prev_close), np.abs(l[1:] - prev_close)),
+        )
+    return tr
+
+
+def _wilder_atr_from_tr(tr: np.ndarray, period: int) -> np.ndarray:
+    n = len(tr)
+    atr = np.full(n, np.nan)
+    if n >= period:
+        seed = tr[:period].mean()
+        atr[period - 1] = seed
+        if n > period:
+            alpha = 1.0 / period
+            tail = pd.Series(tr[period:])
+            seeded = pd.concat([pd.Series([seed]), tail], ignore_index=True)
+            smoothed = seeded.ewm(alpha=alpha, adjust=False).mean().to_numpy()
+            atr[period:] = smoothed[1:]
+    return atr
+
+
+def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[float]) -> int:
+    n = len(df)
+    if lookback_months is None or lookback_months <= 0 or n == 0:
+        return 0
+    idx = df.index
+    if isinstance(idx, pd.DatetimeIndex):
+        cutoff = idx[-1] - pd.DateOffset(months=lookback_months)
+        pos = idx.searchsorted(cutoff, side="left")
+        return int(max(0, pos))
+    approx_bars = int(round(lookback_months * 21))
+    return int(max(0, n - approx_bars))
+
+
+def _bar_dates_array(df: pd.DataFrame):
+    idx = df.index
+    if isinstance(idx, pd.DatetimeIndex):
+        return idx.date
+    try:
+        parsed = pd.to_datetime(idx)
+        return parsed.date
+    except Exception:
+        return None
+
+
+def _prep_arrays(df, p):
+    o = df["open"].to_numpy(dtype=float)
+    h = df["high"].to_numpy(dtype=float)
+    l = df["low"].to_numpy(dtype=float)
+    c = df["close"].to_numpy(dtype=float)
+    v = df["volume"].to_numpy(dtype=float)
+    true_range = _true_range(h, l, c)
+    atr = _wilder_atr_from_tr(true_range, p["atrPeriod"])
+    vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"], min_periods=1).mean().to_numpy()
+    return o, h, l, c, v, true_range, atr, vol_sma
+
+
+def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
+               lookback_months: Optional[float] = None) -> List[Zone]:
+    p = dict(DEFAULT_PARAMS)
+    if params:
+        p.update(params)
+    p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
+    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
+    o, h, l, c, v, true_range, atr, vol_sma = _prep_arrays(df, p)
+    n = len(df)
+    minBaseCount = p["minBaseCount"]
+    maxBaseCount = p["maxBaseCount"]
+    atrPeriod = p["atrPeriod"]
+    bar_dates = _bar_dates_array(df)
+
+    def tr(t, idx):
+        return true_range[t - idx]
+
+    def is_bull(t, idx):
+        return c[t - idx] > o[t - idx]
+
+    def is_bear(t, idx):
+        return o[t - idx] > c[t - idx]
+
+    def wick_pct(t, idx):
+        i = t - idx
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
+        return wicks / rng
+
+    def body_pct(t, idx):
+        i = t - idx
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        body = abs(c[i] - o[i])
+        return body / rng
+
+    def body_high_low(t, idx):
+        i = t - idx
+        return max(o[i], c[i]), min(o[i], c[i])
+
+    zones: List[Zone] = []
+    active_zones: List[Zone] = []
+    min_start = max(atrPeriod, maxBaseCount + 3, 11)
+    record_from_bar = max(min_start, _resolve_start_bar_for_lookback(df, lookback_months))
+    legOutMult = p.get("legOutTrMult", p.get("legOutAtrMult", 1.2))
+
+    for t in range(min_start, n):
+        if np.isnan(atr[t]):
+            continue
+        zoneFoundOnThisBar = False
+        for baseCount in range(minBaseCount, maxBaseCount + 1):
+            if zoneFoundOnThisBar:
+                break
+            legOutIdx = 0
+            legInIdx = baseCount + 1
+            prevIdx = legInIdx + 1
+            if t - prevIdx < 0 or t - baseCount < 0:
+                continue
+            if np.isnan(atr[t - legInIdx]) or np.isnan(atr[t]):
                 continue
 
-            symbol_zones = scan_zones(df, params=params)   # -> List[Zone]
+            legInTR = tr(t, legInIdx)
+            legInLow = l[t - legInIdx]
+            legInHigh = h[t - legInIdx]
+            legInClose = c[t - legInIdx]
+            legInVol = v[t - legInIdx]
+            legInRng = legInHigh - legInLow
+            legInIsBull = is_bull(t, legInIdx)
+            legInIsBear = is_bear(t, legInIdx)
+            if legInRng == 0:
+                continue
+            legInBodyPct = body_pct(t, legInIdx)
+            if legInBodyPct < p["legInMinBodyPct"]:
+                continue
+            prevIsBull = is_bull(t, prevIdx)
+            prevIsBear = is_bear(t, prevIdx)
+            isOppositeColor = (legInIsBull and prevIsBear) or (legInIsBear and prevIsBull)
+            if isOppositeColor:
+                prevBodyHigh, prevBodyLow = body_high_low(t, prevIdx)
+                overlap = max(0.0, min(prevBodyHigh, legInHigh) - max(prevBodyLow, legInLow))
+                coverPct = overlap / legInRng
+                if coverPct >= p["rejectOppositeCoverPct"]:
+                    continue
 
-            # ✅ FIX: .append() nahi, .extend() use karo taaki
-            #         list-of-lists ki jagah ek hi flat list bane
-            for z in symbol_zones:
-                setattr(z, "symbol", sym)          # symbol tag laga do
-                setattr(z, "last_close", float(df["close"].iloc[-1]))
-            all_zones.extend(symbol_zones)          # <-- root-cause fix
+            bullClv = (legInClose - legInLow) / legInRng
+            bearClv = (legInHigh - legInClose) / legInRng
 
-        except Exception as e:
-            errors[sym] = str(e)
+            allBaseValid = True
+            maxBaseTR = 0.0
+            maxBaseHigh = -1.0
+            minBaseLow = float("inf")
+            hasOppositeColorBase = False
+            for b in range(1, baseCount + 1):
+                if np.isnan(atr[t - b]):
+                    allBaseValid = False
+                    break
+                bTR = tr(t, b)
+                if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
+                    allBaseValid = False
+                    break
+                if bTR > maxBaseTR:
+                    maxBaseTR = bTR
+                if h[t - b] > maxBaseHigh:
+                    maxBaseHigh = h[t - b]
+                if l[t - b] < minBaseLow:
+                    minBaseLow = l[t - b]
+            if not allBaseValid or maxBaseTR == 0:
+                continue
+            if legInTR < (p["legInToBaseSizeMult"] * maxBaseTR):
+                continue
+            validLegIn = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
+            if not validLegIn:
+                continue
 
-    return all_zones, errors     # <-- caller ko explicitly dono milte hain
+            legOutTR = tr(t, legOutIdx)
+            legOutHigh = h[t - legOutIdx]
+            legOutLow = l[t - legOutIdx]
+            legOutClose = c[t - legOutIdx]
+            legOutOpen = o[t - legOutIdx]
+            legOutVol = v[t - legOutIdx]
+            isDemandLegOut = is_bull(t, legOutIdx)
+            isSupplyLegOut = is_bear(t, legOutIdx)
+            if not (isDemandLegOut or isSupplyLegOut):
+                continue
+            isLegOutExplosive = legOutTR >= (legOutMult * atr[t - legOutIdx])
+            isLegOutWickValid = wick_pct(t, legOutIdx) <= p["maxWickPct"]
+            passesTRHierarchy = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
+            passesVolume = legOutVol > legInVol
+
+            isOvernightGap = False
+            if bar_dates is not None:
+                try:
+                    isOvernightGap = bar_dates[t] != bar_dates[t - 1]
+                except Exception:
+                    isOvernightGap = False
+
+            hasImbalance = True
+            hasGenuineGap = False
+            gapSize = 0.0
+            legInCap = p["maxImbalanceVsLegInMult"] * legInTR
+            if isOvernightGap and p.get("relaxGapCapOnOvernight", True):
+                gapCap = float("inf")
+            else:
+                gapCap = legInCap
+            if p["useImbalance"]:
+                if isDemandLegOut:
+                    hasGenuineGap = legOutLow > maxBaseHigh
+                    gapCond = hasGenuineGap or (legOutClose > legInHigh)
+                    gapSize = max(0.0, legOutLow - maxBaseHigh)
+                    hasImbalance = gapCond and (gapSize <= gapCap)
+                elif isSupplyLegOut:
+                    hasGenuineGap = legOutHigh < minBaseLow
+                    gapCond = hasGenuineGap or (legOutClose < legInLow)
+                    gapSize = max(0.0, minBaseLow - legOutHigh)
+                    hasImbalance = gapCond and (gapSize <= gapCap)
+                if hasGenuineGap and gapSize > gapCap:
+                    hasGenuineGap = False
+
+            legOutBodyHigh = max(legOutOpen, legOutClose)
+            legOutBodyLow = min(legOutOpen, legOutClose)
+            legOutBodyEngulfsBase = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
+            if legOutBodyEngulfsBase and not hasGenuineGap:
+                continue
+
+            isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
+            isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
+            isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
+            isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut
+            isValid = (
+                (isRBR or isDBR or isDBD or isRBD)
+                and isLegOutExplosive
+                and isLegOutWickValid
+                and passesTRHierarchy
+                and passesVolume
+                and hasImbalance
+            )
+            if not isValid:
+                continue
+
+            densityScore = 0
+            if baseCount == 1:
+                densityScore += 15
+            if legInTR >= (p["hqLegInAtrMult"] * atr[t - legInIdx]):
+                densityScore += 10
+            if legOutTR >= (p["hqLegOutTrMult"] * legInTR):
+                densityScore += 15
+            if (legInTR >= 2.0 * maxBaseTR) and (legOutTR >= 2.0 * legInTR):
+                densityScore += 15
+            if legOutVol > vol_sma[t - legOutIdx]:
+                densityScore += 10
+            if isDemandLegOut:
+                legOutBodyPos = (legOutClose - legOutLow) / (legOutHigh - legOutLow) if (legOutHigh - legOutLow) > 0 else 0
+                legOutOwnBodyPct = body_pct(t, legOutIdx)
+                if isDBR:
+                    if (legOutBodyPos >= 0.80) or (legOutOwnBodyPct >= p["legOutBodyHeavyPressurePct"]):
+                        densityScore += 15
+                else:
+                    if legOutBodyPos >= 0.80:
+                        densityScore += 15
+            else:
+                legOutBodyPos = (legOutHigh - legOutClose) / (legOutHigh - legOutLow) if (legOutHigh - legOutLow) > 0 else 0
+                if legOutBodyPos >= 0.80:
+                    densityScore += 15
+            for b in range(1, baseCount + 1):
+                if isDemandLegOut and is_bear(t, b):
+                    hasOppositeColorBase = True
+                    break
+                elif isSupplyLegOut and is_bull(t, b):
+                    hasOppositeColorBase = True
+                    break
+            if hasOppositeColorBase:
+                densityScore += 10
+            densityScore += 10
+            if hasGenuineGap:
+                densityScore += p["genuineGapScoreBonus"]
+            if isOvernightGap and hasGenuineGap:
+                densityScore += p["overnightGapScoreBonus"]
+            if densityScore < p["minValidScore"]:
+                continue
+
+            isHQZone = densityScore >= p["hqScoreThreshold"]
+            zoneFoundOnThisBar = True
+
+            proxVal = maxBaseHigh if isDemandLegOut else minBaseLow
+            distVal = minBaseLow if isDemandLegOut else maxBaseHigh
+            slVal = (distVal - p["slBufferAtr"] * atr[t]) if isDemandLegOut else (distVal + p["slBufferAtr"] * atr[t])
+            riskPerShare = abs(proxVal - slVal)
+            tpVal = (proxVal + riskPerShare * p["targetRR"]) if isDemandLegOut else (proxVal - riskPerShare * p["targetRR"])
+            if isDemandLegOut:
+                legOutMidLevel = legOutHigh - p["testedLegOutRetracePct"] * (legOutHigh - legOutLow)
+            else:
+                legOutMidLevel = legOutLow + p["testedLegOutRetracePct"] * (legOutHigh - legOutLow)
+
+            isDuplicate = False
+            checked = 0
+            for checkZ in reversed(zones):
+                if checkZ.state == "Broken":
+                    continue
+                if checkZ.isDemand == isDemandLegOut and abs(checkZ.proxVal - proxVal) < (atr[t] * 0.25):
+                    isDuplicate = True
+                    break
+                checked += 1
+                if checked >= 11:
+                    break
+            if isDuplicate:
+                continue
+
+            if isRBR:
+                patternType, zoneCategory = "RBR", "Continuation"
+            elif isDBR:
+                patternType, zoneCategory = "DBR", "Reversal"
+            elif isDBD:
+                patternType, zoneCategory = "DBD", "Continuation"
+            else:
+                patternType, zoneCategory = "RBD", "Reversal"
+
+            leftBar = t - baseCount
+            newZone = Zone(
+                proxVal=proxVal, distVal=distVal, slVal=slVal, tpVal=tpVal,
+                isDemand=isDemandLegOut, isHQ=isHQZone, densityScore=densityScore,
+                patternType=patternType, zoneCategory=zoneCategory, state="Fresh",
+                touchCount=0, originalDensityScore=densityScore,
+                startBarIndex=leftBar, createdBarIndex=t, baseCount=baseCount,
+                timestamp=df.index[t],
+                legOutHigh=legOutHigh, legOutLow=legOutLow, legOutMidLevel=legOutMidLevel,
+                isOvernightGap=isOvernightGap, legInTR=legInTR, legOutTR=legOutTR,
+            )
+            zones.append(newZone)
+            active_zones.append(newZone)
+
+        if active_zones:
+            lo_t, hi_t = l[t], h[t]
+            still_active = []
+            for z in active_zones:
+                if z.state == "Fresh":
+                    if z.isDemand:
+                        if lo_t <= z.distVal:
+                            z.state = "Broken"
+                        elif lo_t <= z.legOutMidLevel:
+                            z.state = "Tested"
+                            z.touchCount += 1
+                    else:
+                        if hi_t >= z.distVal:
+                            z.state = "Broken"
+                        elif hi_t >= z.legOutMidLevel:
+                            z.state = "Tested"
+                            z.touchCount += 1
+                elif z.state == "Tested":
+                    if z.isDemand:
+                        if lo_t <= z.distVal:
+                            z.state = "Broken"
+                        elif lo_t <= z.legOutMidLevel:
+                            z.touchCount += 1
+                    else:
+                        if hi_t >= z.distVal:
+                            z.state = "Broken"
+                        elif hi_t >= z.legOutMidLevel:
+                            z.touchCount += 1
+                if z.state == "Tested" and z.touchCount > p["maxTestedCount"]:
+                    z.state = "Broken"
+                if z.state != "Broken":
+                    still_active.append(z)
+            active_zones = still_active
+
+    if lookback_months is None:
+        return zones
+    return [z for z in zones if z.createdBarIndex >= record_from_bar]
 
 
-# ==============================================================================
-# 7. AUTO-REFRESH LOGIC (simple, external package ke bina)
-# ==============================================================================
-if auto_refresh_min > 0:
-    st.sidebar.caption(f"⏱️ हर {auto_refresh_min:.0f} मिनट में auto-refresh होगा।")
-    # session_state me last refresh time track karo
-    if "last_refresh" not in st.session_state:
-        st.session_state.last_refresh = time.time()
+def latest_active_zones(zones: List[Zone], include_tested: bool = True) -> List[Zone]:
+    states = {"Fresh"} | ({"Tested"} if include_tested else set())
+    return [z for z in zones if z.state in states]
 
-    elapsed_min = (time.time() - st.session_state.last_refresh) / 60.0
-    if elapsed_min >= auto_refresh_min:
-        st.session_state.last_refresh = time.time()
-        st.cache_data.clear()
-        st.rerun()
 
-# ==============================================================================
-# 8. RUN SCAN
-# ==============================================================================
-if "zones_result" not in st.session_state:
-    st.session_state.zones_result = None
-    st.session_state.errors_result = None
-
-if scan_clicked or (auto_refresh_min > 0 and st.session_state.zones_result is None):
-    zones, errors = run_full_scan(symbols, interval, period, user_params)
-    st.session_state.zones_result = zones
-    st.session_state.errors_result = errors
-
-zones = st.session_state.zones_result
-errors = st.session_state.errors_result
-
-# ==============================================================================
-# 9. RESULTS DISPLAY
-# ==============================================================================
-if zones is None:
-    st.info("👈 Sidebar se settings चुनकर **'Scan Zones'** बटन दबाएँ।")
-    st.stop()
-
-if errors:
-    with st.expander(f"⚠️ {len(errors)} symbol(s) me समस्या आई", expanded=False):
-        for sym, msg in errors.items():
-            st.write(f"**{sym}**: {msg}")
-
-if len(zones) == 0:
-    st.warning("कोई zone नहीं मिला। Parameters relax करें या अलग symbols try करें।")
-    st.stop()
-
-# ---------------- FILTERS APPLY (safe, .state hamesha available hoga) ----------------
-# ✅ यहाँ अब कभी AttributeError नहीं आएगा क्योंकि zones हमेशा List[Zone] है
-active_states = {"Fresh", "Tested"}
-filtered = [z for z in zones if z.state in active_states]
-
-if pattern_category != "सभी":
-    filtered = [z for z in filtered if z.zoneCategory == pattern_category]
-
-if only_hq:
-    filtered = [z for z in filtered if z.densityScore >= hq_min_score]
-
-if only_near_price:
-    near_list = []
-    for z in filtered:
-        lc = getattr(z, "last_close", None)
-        if lc is None or z.proxVal <= 0:
+def get_zone_alerts(zones, current_price, min_proximity_pct=0.0, max_proximity_pct=1.0,
+                     include_tested=True) -> List[Dict[str, Any]]:
+    alerts = []
+    candidates = latest_active_zones(zones, include_tested=include_tested)
+    for z in candidates:
+        if z.proxVal <= 0:
             continue
         if z.isDemand:
-            diff_pct = abs((lc - z.proxVal) / z.proxVal) * 100
+            diff_pct = (current_price - z.proxVal) / z.proxVal
+            direction = "DEMAND"
         else:
-            diff_pct = abs((z.proxVal - lc) / z.proxVal) * 100
-        if diff_pct <= near_price_pct:
-            near_list.append(z)
-    filtered = near_list
+            diff_pct = (z.proxVal - current_price) / z.proxVal
+            direction = "SUPPLY"
+        if not (min_proximity_pct <= diff_pct <= max_proximity_pct):
+            continue
+        alerts.append({
+            "direction": direction, "pattern": z.patternType, "category": z.zoneCategory,
+            "entry": z.proxVal, "sl": z.slVal, "tp": z.tpVal, "is_hq": z.isHQ,
+            "score": z.densityScore, "touch_count": z.touchCount,
+            "is_overnight_gap": z.isOvernightGap,
+            "legInTR": z.legInTR, "legOutTR": z.legOutTR,
+            "distance_pct": diff_pct * 100, "state": z.state, "timestamp": z.timestamp,
+        })
+    alerts.sort(key=lambda a: (-int(a["is_hq"]), a["distance_pct"]))
+    return alerts
 
-st.success(f"✅ कुल {len(zones)} zones मिले | Filter के बाद: {len(filtered)}")
 
-# ---------------- TABLE बनाना ----------------
-rows = []
-for z in filtered:
-    lc = getattr(z, "last_close", np.nan)
-    sym = getattr(z, "symbol", "-")
-    if z.proxVal > 0 and not np.isnan(lc):
-        if z.isDemand:
-            dist_pct = ((lc - z.proxVal) / z.proxVal) * 100
-        else:
-            dist_pct = ((z.proxVal - lc) / z.proxVal) * 100
+def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> List[Dict[str, Any]]:
+    p = dict(DEFAULT_PARAMS)
+    if params:
+        p.update(params)
+    p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
+    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
+    o, h, l, c, v, true_range, atr, vol_sma = _prep_arrays(df, p)
+    bar_dates = _bar_dates_array(df)
+    if isinstance(at_index, (int, np.integer)):
+        t = int(at_index)
     else:
-        dist_pct = np.nan
+        t = int(df.index.get_loc(at_index))
 
-    rows.append({
-        "Symbol": sym,
-        "Type": "🟢 Demand" if z.isDemand else "🔴 Supply",
-        "Pattern": z.patternType,
-        "Category": z.zoneCategory,
-        "State": z.state,
-        "HQ": "⭐" if z.isHQ else "",
-        "Score": z.densityScore,
-        "Entry (Prox)": round(z.proxVal, 2),
-        "SL": round(z.slVal, 2),
-        "TP": round(z.tpVal, 2),
-        "LTP": round(lc, 2) if not np.isnan(lc) else None,
-        "Dist %": round(dist_pct, 2) if not np.isnan(dist_pct) else None,
-        "Touches": z.touchCount,
-        "Overnight Gap": "✅" if z.isOvernightGap else "",
-        "Created At": z.timestamp,
-    })
+    def tr(idx_from_t):
+        return true_range[t - idx_from_t]
 
-result_df = pd.DataFrame(rows)
-if not result_df.empty:
-    result_df = result_df.sort_values(
-        by=["HQ", "Dist %"], ascending=[False, True], na_position="last"
-    )
+    def naive_hl_range(idx_from_t):
+        i = t - idx_from_t
+        return h[i] - l[i]
 
-st.subheader("📋 Zone Results")
-st.dataframe(result_df, use_container_width=True, hide_index=True)
+    def is_bull(idx_from_t):
+        return c[t - idx_from_t] > o[t - idx_from_t]
 
-# ---------------- Download ----------------
-if not result_df.empty:
-    csv = result_df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("⬇️ CSV Download करें", data=csv, file_name="zones.csv", mime="text/csv")
+    def is_bear(idx_from_t):
+        return o[t - idx_from_t] > c[t - idx_from_t]
+
+    def wick_pct(idx_from_t):
+        i = t - idx_from_t
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        wicks = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
+        return wicks / rng
+
+    def body_pct(idx_from_t):
+        i = t - idx_from_t
+        rng = h[i] - l[i]
+        if rng == 0:
+            return 0.0
+        return abs(c[i] - o[i]) / rng
+
+    legOutMult = p.get("legOutTrMult", p.get("legOutAtrMult", 1.2))
+    reports = []
+    for baseCount in range(p["minBaseCount"], p["maxBaseCount"] + 1):
+        rep: Dict[str, Any] = {"baseCount": baseCount, "legOutTimestamp": df.index[t]}
+        legOutIdx = 0
+        legInIdx = baseCount + 1
+        prevIdx = legInIdx + 1
+        if t - prevIdx < 0 or t - baseCount < 0 or np.isnan(atr[t]) or np.isnan(atr[t - legInIdx]):
+            rep["result"] = "SKIP (डेटा/ATR अपर्याप्त)"
+            reports.append(rep)
+            continue
+        legInTR = tr(legInIdx)
+        rep["legInTR(correct)"] = legInTR
+        rep["legInTR(old_buggy_H-L)"] = naive_hl_range(legInIdx)
+        legInLow = l[t - legInIdx]; legInHigh = h[t - legInIdx]; legInClose = c[t - legInIdx]
+        legInVol = v[t - legInIdx]; legInRng = legInHigh - legInLow
+        legInIsBull, legInIsBear = is_bull(legInIdx), is_bear(legInIdx)
+        rep["legInATR"] = atr[t - legInIdx]
+        rep["legIn_TR_gte_ATR"] = legInTR >= (p["legInMinAtrMult"] * atr[t - legInIdx])
+        if legInRng == 0:
+            rep["result"] = "INVALID (legInRng=0)"
+            reports.append(rep)
+            continue
+        rep["legInBodyPct"] = body_pct(legInIdx)
+        rep["legIn_body_ok"] = rep["legInBodyPct"] >= p["legInMinBodyPct"]
+        bullClv = (legInClose - legInLow) / legInRng
+        bearClv = (legInHigh - legInClose) / legInRng
+        rep["bullClv"] = bullClv
+        rep["bearClv"] = bearClv
+        maxBaseTR = 0.0; maxBaseHigh = -1.0; minBaseLow = float("inf"); allBaseValid = True
+        for b in range(1, baseCount + 1):
+            if np.isnan(atr[t - b]):
+                allBaseValid = False
+                break
+            bTR = tr(b)
+            if bTR > (p["maxBaseAtrMult"] * atr[t - b]):
+                allBaseValid = False
+            if bTR > maxBaseTR:
+                maxBaseTR = bTR
+            if h[t - b] > maxBaseHigh:
+                maxBaseHigh = h[t - b]
+            if l[t - b] < minBaseLow:
+                minBaseLow = l[t - b]
+        rep["maxBaseTR"] = maxBaseTR
+        rep["base_all_valid(<=ATR)"] = allBaseValid
+        rep["legIn_gte_2xBase"] = legInTR >= (p["legInToBaseSizeMult"] * maxBaseTR) if maxBaseTR else False
+        legOutTR = tr(legOutIdx)
+        rep["legOutTR(correct,gap-aware)"] = legOutTR
+        rep["legOutTR(old_buggy_H-L)"] = naive_hl_range(legOutIdx)
+        legOutHigh = h[t - legOutIdx]; legOutLow = l[t - legOutIdx]
+        legOutClose = c[t - legOutIdx]; legOutOpen = o[t - legOutIdx]; legOutVol = v[t - legOutIdx]
+        isDemandLegOut, isSupplyLegOut = is_bull(legOutIdx), is_bear(legOutIdx)
+        rep["legOutATR"] = atr[t - legOutIdx]
+        rep["legOut_explosive(>=1.2xATR)"] = legOutTR >= (legOutMult * atr[t - legOutIdx])
+        rep["legOut_wickPct"] = wick_pct(legOutIdx)
+        rep["legOut_wick_ok(<=30%)"] = rep["legOut_wickPct"] <= p["maxWickPct"]
+        rep["TR_hierarchy_ok(legOut>=legIn>base)"] = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
+        rep["volume_ok(legOut>legIn)"] = legOutVol > legInVol
+        isOvernightGap = False
+        if bar_dates is not None:
+            try:
+                isOvernightGap = bar_dates[t] != bar_dates[t - 1]
+            except Exception:
+                isOvernightGap = False
+        rep["isOvernightGap"] = isOvernightGap
+        legInCap = p["maxImbalanceVsLegInMult"] * legInTR
+        gapCap = float("inf") if (isOvernightGap and p.get("relaxGapCapOnOvernight", True)) else legInCap
+        hasGenuineGap = False; gapSize = 0.0; hasImbalance = True
+        if p["useImbalance"]:
+            if isDemandLegOut:
+                hasGenuineGap = legOutLow > maxBaseHigh
+                gapCond = hasGenuineGap or (legOutClose > legInHigh)
+                gapSize = max(0.0, legOutLow - maxBaseHigh)
+                hasImbalance = gapCond and (gapSize <= gapCap)
+            elif isSupplyLegOut:
+                hasGenuineGap = legOutHigh < minBaseLow
+                gapCond = hasGenuineGap or (legOutClose < legInLow)
+                gapSize = max(0.0, minBaseLow - legOutHigh)
+                hasImbalance = gapCond and (gapSize <= gapCap)
+        rep["gapSize"] = gapSize
+        rep["hasGenuineGap"] = hasGenuineGap
+        rep["imbalance_ok"] = hasImbalance
+        legOutBodyHigh = max(legOutOpen, legOutClose); legOutBodyLow = min(legOutOpen, legOutClose)
+        engulf = (legOutBodyLow <= minBaseLow) and (legOutBodyHigh >= maxBaseHigh)
+        rep["engulfsBase"] = engulf
+        rep["engulf_ok"] = (not engulf) or hasGenuineGap
+        isRBR = legInIsBull and (bullClv >= p["minClvPct"]) and isDemandLegOut
+        isDBR = legInIsBear and (bearClv >= p["minClvPct"]) and isDemandLegOut
+        isDBD = legInIsBear and (bearClv >= p["minClvPct"]) and isSupplyLegOut
+        isRBD = legInIsBull and (bullClv >= p["minClvPct"]) and isSupplyLegOut
+        rep["pattern"] = "RBR" if isRBR else "DBR" if isDBR else "DBD" if isDBD else "RBD" if isRBD else "NONE"
+        rep["FINAL_VALID"] = bool(
+            rep["legIn_TR_gte_ATR"] and rep.get("legIn_body_ok") and rep.get("legIn_gte_2xBase")
+            and allBaseValid and rep["pattern"] != "NONE"
+            and rep["legOut_explosive(>=1.2xATR)"] and rep["legOut_wick_ok(<=30%)"]
+            and rep["TR_hierarchy_ok(legOut>=legIn>base)"] and rep["volume_ok(legOut>legIn)"]
+            and rep["imbalance_ok"] and rep["engulf_ok"]
+        )
+        reports.append(rep)
+    return reports
