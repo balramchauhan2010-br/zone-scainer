@@ -9,8 +9,6 @@ Universe    : सभी NSE स्टॉक्स + Global macro instruments
 Chart Link  : Symbol पर क्लिक करते ही TradingView चार्ट (नया टैब)
 Speed       : Batched yfinance download + session-level zone-cache
               (नया candle-close ना हो तो दोबारा scan नहीं होता)
-
-⚠️ EDUCATIONAL/INFORMATIONAL TOOL — SEBI-registered निवेश सलाह नहीं है।
 """
 
 import concurrent.futures
@@ -125,8 +123,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 Institutional Demand & Supply Zone Scanner")
-st.caption("⚠️ EDUCATIONAL टूल — SEBI-registered निवेश सलाह नहीं। DBR/RBR/RBD/DBD — सभी 4 पैटर्न कवर।")
+st.title("📊 Demand & Supply Zone Scanner")
+st.caption("। DBR/RBR/RBD/DBD — सभी 4 पैटर्न कवर।")
 
 
 def tv_link(symbol: str) -> str:
