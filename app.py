@@ -440,11 +440,4 @@ if scan_btn or st.session_state.get("has_scanned", False):
 else:
     st.info("👈 Sidebar से Timeframe/Universe/Lookback चुनकर **🔍 Scan Zones** बटन दबाएं।")
     st.markdown("""
-    ### 📋 यह Scanner क्या करता है
-    - **4 Institutional Patterns**: DBR (Demand-Reversal), RBR (Demand-Continuation),
-      RBD (Supply-Reversal), DBD (Supply-Continuation)
-    - **Leg-In pressure + CLV check**, **Base quality rules**, **Leg-Out explosive+volume-climax**,
-      **Sweep+Rejection**, **Risk-normalization**, **Freshness decay** — सब शामिल
-    - Symbol पर क्लिक करते ही TradingView चार्ट नए टैब में खुलेगा
-    - एक बार scan होने के बाद, जब तक नया candle close नहीं होता, दोबारा compute नहीं होता (Fast ⚡)
-    """)
+    
