@@ -439,9 +439,6 @@ if scan_btn or st.session_state.get("has_scanned", False):
             st.download_button("⬇️ CSV डाउनलोड करें", csv, "zone_scan.csv", "text/csv")
 else:
     st.info("👈 Sidebar से Timeframe/Universe/Lookback चुनकर **🔍 Scan Zones** बटन दबाएं।")
-    st.markdown("""### 📋 यह Scanner क्या करता है
-    - **4 Institutional Patterns**: DBR (Demand-Reversal), RBR (Demand-Continuation),
-      RBD (Supply-Reversal), DBD (Supply-Continuation)
-    - एक बार scan होने के बाद, जब तक नया candle close नहीं होता, दोबारा compute नहीं होता (Fast ⚡)
+    st.markdown("""### 
     """)
     
