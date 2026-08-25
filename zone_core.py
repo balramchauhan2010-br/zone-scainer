@@ -1,57 +1,57 @@
 # -*- coding: utf-8 -*-
 """
-zone_core.py — v9.2
-(v9.1 पर आधारित — सिर्फ़ 2 यूज़र-निर्देशित बदलाव किए गए, बाकी सब कुछ यथावत)
+zone_core.py — v9.3  (Pine Script v6 parity — "जैसा Pine स्कैन करता है वैसा ही")
+(v9.2 पर आधारित — सिर्फ़ वही बदलाव जो Pine Script v6 से match करने के लिए ज़रूरी थे)
 
-=== v9.1 से v9.2 में क्या बदला (सिर्फ़ 2 बदलाव, यूज़र-निर्देशित) ===
+=== v9.2 से v9.3 में क्या बदला (सिर्फ़ 4 बदलाव — Pine v6 से exact match) ===
 
-(1) [GENUINE GAP डेफिनिशन बदली]
-    पुराना (v9.1): hasGenuineGap = legOutLow > maxBaseHigh (Demand)
-                                  = legOutHigh < minBaseLow (Supply)
-    नया (v9.2)   : Base के (Leg-Out से सटी हुई/adjacent) कैंडल के Close vs
-                   Leg-Out कैंडल के Open की तुलना पर आधारित:
-        Demand : hasGenuineGap = legOutOpen > baseCloseAdjacent
-        Supply : hasGenuineGap = legOutOpen < baseCloseAdjacent
-    gapSize भी इसी नई definition पर आधारित कर दिया गया:
-        Demand : gapSize = max(0, legOutOpen - baseCloseAdjacent)
-        Supply : gapSize = max(0, baseCloseAdjacent - legOutOpen)
-    बाकी सब कुछ (gapCond का OR-structure, overnight gapCap-relax, gap-size
-    cap-check, scoring bonus इस्तेमाल) पूरी तरह यथावत रखा गया है — सिर्फ़
-    "genuine gap कैसे पहचानें" का फ़ॉर्मूला बदला है।
-    (scan_zones() और diagnose_bar() दोनों में सिंक किया गया)
+Pine Script (TradingView) और zone_core.py v9.2 की line-by-line तुलना में 4 जगह
+लॉजिक अलग निकला। यही 4 अंतर वजह थे कि Pine ज़्यादा zones scan कर पा रहा था
+और Python नहीं। अब दोनों identical हैं:
 
-(2) [FRESH -> TESTED -> BROKEN स्टेट-मशीन बदली]
-    पुराना (v9.1): Fresh->Tested ट्रिगर = legOutMidLevel (Leg-Out कैंडल का
-                   50% retracement लेवल)
-    नया (v9.2)   : Fresh->Tested ट्रिगर = proxVal (ज़ोन की Proximal/Base-
-                   boundary लाइन) — यानी जैसे ही प्राइस वापस आकर ज़ोन के
-                   Base-किनारे को छू ले, वहीं से "Tested" गिना जाएगा।
-                   Tested->Broken ट्रिगर पहले जैसा ही है = distVal टूटना।
-        Demand : Fresh जब तक lo_t > proxVal
-                 Tested जब lo_t <= proxVal (और lo_t > distVal)
-                 Broken जब lo_t <= distVal
-        Supply : Fresh जब तक hi_t < proxVal
-                 Tested जब hi_t >= proxVal (और hi_t < distVal)
-                 Broken जब hi_t >= distVal
-    touchCount/maxTestedCount की गिनती-व्यवस्था (हर बार जब प्राइस उस लेवल
-    को छुए तो +1, maxTestedCount से ज़्यादा होने पर Broken) बिल्कुल पहले
-    जैसी ही रखी गई है — सिर्फ़ "किस लेवल पर टच काउंट हो" यह बदला है।
-    legOutMidLevel अभी भी calculate/store होता है (Zone.legOutMidLevel
-    field में) ताकि किसी और जगह (जैसे app.py) रेफरेंस टूटे नहीं — बस अब
-    यह स्टेट-ट्रांज़िशन में इस्तेमाल नहीं होता।
+(1) [GENUINE GAP — Pine की वापस v9.1-style definition]
+    Pine : Demand  hasGenuineGap = legOutLow  > maxBaseHigh
+           Supply  hasGenuineGap = legOutHigh < minBaseLow
+           Demand  gapSize       = max(0, legOutLow  - maxBaseHigh)
+           Supply  gapSize       = max(0, minBaseLow - legOutHigh)
+    (v9.2 का "legOutOpen vs baseCloseAdjacent" वाला नया फ़ॉर्मूला हटाया गया)
+
+(2) [GAP-SIZE CAP पूरी तरह हटाया गया]
+    Pine में hasImbalance = gapCond (सिर्फ़ gap condition) है — कोई gap-size
+    cap नहीं, कोई overnight-relax नहीं।
+    v9.2 में यह था: hasImbalance = gapCond AND (gapSize <= gapCap)
+    अब (v9.3): hasImbalance = gapCond
+    इसलिए v9.2 कुछ zones को गलत तरीके से reject कर रहा था जो Pine accept
+    करता था। (maxImbalanceVsLegInMult / relaxGapCapOnOvernight params अब भी
+    DEFAULT_PARAMS में हैं लेकिन Pine की तरह logic में use नहीं होते।)
+
+(3) [SINGLE-BASE MULTIPLIER 1.2 → 1.5]
+    Pine : effectiveBaseSizeMult = (bCount == 1) ? 1.5 : legInToBaseSizeMult
+    v9.2 : legInToBaseSizeMultSingleBase = 1.2
+    v9.3 : legInToBaseSizeMultSingleBase = 1.5   (Pine parity)
+
+(4) [FRESH→TESTED ट्रिगर वापस legOutMidLevel]
+    Pine : Fresh→Tested = legOutMidLevel टच (और Tested में touchCount भी
+           legOutMidLevel पर ही बढ़ता है)
+    v9.2 : Fresh→Tested = proxVal टच
+    v9.3 : वापस legOutMidLevel (Pine parity)
 
 --------------------------------------------------------------------------
-बाकी सब कुछ (v9.0/v9.1 से) पूरी तरह यथावत:
-  - Gap-Aware True Range (हर जगह)
-  - Leg-In: Body%>=60%, opposite-color-overlap-reject, TR>=ATR,
-            TR>=[baseCount==1 ? 1.2x : 2.0x]MaxBaseTR
+बाकी सब कुछ (v9.0/v9.1/v9.2 से) पूरी तरह यथावत:
+  - Gap-Aware True Range (हर जगह) — Pine के true_range()/tr(idx) जैसा
+  - Wilder ATR (ta.rma जैसा)
+  - Leg-In: Body%>=60%, opposite-color-overlap-reject, TR>=ATR, TR>=Mult*MaxBaseTR
   - Base: TR<=ATR हर candle पर
   - Leg-Out: Explosive(>=1.2xATR), Wick%<=30%, TR-Hierarchy, Volume-check,
              Body-engulf-check (genuine gap हो तो exempt)
   - Scoring: <40 invalid, >=90 HQ, overnight+genuine-gap बोनस
-  - v9.1 की सभी highlight-tagging features (reformedAfterBreak, MTF
-    confluence, zone_highlight_tags) पूरी तरह यथावत
+  - डुप्लीकेट फिल्टर, state-machine की Broken→distVal लॉजिक
+  - v9.1 की highlight-tagging features (reformedAfterBreak, MTF confluence)
 --------------------------------------------------------------------------
+
+नोट: Zone dataclass में hasGenuineGap/gapSize store किए जाते हैं — Pine में ये
+Zone में store नहीं होते (सिर्फ़ local variable हैं), लेकिन Python में analysis/
+debugging के लिए रखे गए हैं। इससे scan का नतीजा नहीं बदलता।
 
 Public entry points:
     scan_zones(df, params=None, lookback_months=None)          -> List[Zone]
@@ -78,24 +78,24 @@ DEFAULT_PARAMS = dict(
     hqLegOutTrMult=2.0,
     hqLegInAtrMult=1.5,
     maxBaseAtrMult=1.0,
-    maxWickPct=0.30,   # [CONFIRMED — यथावत] Leg-Out कैंडल पर लागू
+    maxWickPct=0.30,   # [यथावत] Leg-Out कैंडल पर लागू
     minBaseCount=1,
     maxBaseCount=3,
     legInMinAtrMult=1.0,
     minClvPct=0.60,
     legInToBaseSizeMult=2.0,             # baseCount == 2 या 3 के लिए (यथावत)
-    legInToBaseSizeMultSingleBase=1.2,   # baseCount == 1 के लिए (यथावत)
+    legInToBaseSizeMultSingleBase=1.5,   # [CHANGED v9.3] 1.2 → 1.5 (Pine: 1.5)
     legInMinBodyPct=0.60,
     useImbalance=True,
-    maxImbalanceVsLegInMult=1.0,
-    relaxGapCapOnOvernight=True,
+    maxImbalanceVsLegInMult=1.0,   # [Pine parity] Pine में defined-but-unused; अब logic में use नहीं
+    relaxGapCapOnOvernight=True,   # [Pine parity] Pine में defined-but-unused; अब logic में use नहीं
     genuineGapScoreBonus=10,
     overnightGapScoreBonus=15,
     rejectOppositeCoverPct=0.50,
     minValidScore=40,
     hqScoreThreshold=90,
     legOutBodyHeavyPressurePct=0.60,
-    testedLegOutRetracePct=0.50,   # अब सिर्फ़ legOutMidLevel के लिए (डिस्प्ले/legacy) — स्टेट-लॉजिक में इस्तेमाल नहीं
+    testedLegOutRetracePct=0.50,   # legOutMidLevel के लिए — Pine parity के तहत state-logic में फिर से use होता है
     maxTestedCount=2,
 )
 
@@ -122,10 +122,12 @@ class Zone:
     timestamp: object = None
     legOutHigh: float = 0.0
     legOutLow: float = 0.0
-    legOutMidLevel: float = 0.0   # अब सिर्फ़ रेफरेंस/डिस्प्ले के लिए (state-logic में इस्तेमाल नहीं)
+    legOutMidLevel: float = 0.0   # Pine parity: state-logic में फिर से use होता है
     isOvernightGap: bool = False
     legInTR: float = 0.0
     legOutTR: float = 0.0
+    hasGenuineGap: bool = False   # [Pine में local var — Python में analysis के लिए store]
+    gapSize: float = 0.0          # [Pine में local var — Python में analysis के लिए store]
     reformedAfterBreak: bool = False
     isMTFConfluence: bool = False
     isNestedInBiggerTF: bool = False
@@ -133,7 +135,7 @@ class Zone:
 
 
 # --------------------------------------------------------------------------
-# सही True Range (Gap-Aware) — यथावत
+# सही True Range (Gap-Aware) — यथावत (Pine true_range()/tr(idx) जैसा)
 # --------------------------------------------------------------------------
 def _true_range(h, l, c):
     n = len(h)
@@ -149,6 +151,7 @@ def _true_range(h, l, c):
 
 
 def _wilder_atr_from_tr(tr: np.ndarray, period: int) -> np.ndarray:
+    # Pine ta.rma() = Wilder smoothing, बिल्कुल वही
     n = len(tr)
     atr = np.full(n, np.nan)
     if n >= period:
@@ -164,6 +167,7 @@ def _wilder_atr_from_tr(tr: np.ndarray, period: int) -> np.ndarray:
 
 
 def _resolve_start_bar_for_lookback(df: pd.DataFrame, lookback_months: Optional[float]) -> int:
+    # (Python-only extra feature — Pine में नहीं है, scan logic पर असर नहीं)
     n = len(df)
     if lookback_months is None or lookback_months <= 0 or n == 0:
         return 0
@@ -195,7 +199,10 @@ def _prep_arrays(df, p):
     v = df["volume"].to_numpy(dtype=float)
     true_range = _true_range(h, l, c)
     atr = _wilder_atr_from_tr(true_range, p["atrPeriod"])
-    vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"], min_periods=1).mean().to_numpy()
+    # [Pine parity] ta.sma(volume, volSmaPeriod) पूरे window के बिना na देता है —
+    # इसलिए plain rolling (बिना min_periods) रखा गया, ताकि शुरुआती bars पर
+    # vol_sma NaN हो और legOutVol > NaN False हो (बिल्कुल Pine जैसा)
+    vol_sma = pd.Series(v).rolling(window=p["volSmaPeriod"]).mean().to_numpy()
     return o, h, l, c, v, true_range, atr, vol_sma
 
 
@@ -212,15 +219,20 @@ def _ranges_nested(inner_lo, inner_hi, outer_lo, outer_hi) -> bool:
 
 
 # --------------------------------------------------------------------------
-# मुख्य स्कैनिंग इंजन
+# मुख्य स्कैनिंग इंजन (Pine v6 parity)
 # --------------------------------------------------------------------------
 def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                lookback_months: Optional[float] = None) -> List[Zone]:
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
-    p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
-    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
+    # [Pine parity] min/max baseCount का clamp Pine के order में:
+    #   minBaseCount = max(1, min(minBaseCountInput, maxBaseCountInput))
+    #   maxBaseCount = min(maxBaseCountInput, HARD_MAX_BASE_COUNT)
+    raw_max_base = int(p["maxBaseCount"])
+    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), raw_max_base))
+    p["maxBaseCount"] = min(raw_max_base, _HARD_MAX_BASE_COUNT)
+
     o, h, l, c, v, true_range, atr, vol_sma = _prep_arrays(df, p)
     n = len(df)
     minBaseCount = p["minBaseCount"]
@@ -328,6 +340,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             if not allBaseValid or maxBaseTR == 0:
                 continue
 
+            # [Pine parity] baseCount==1 पर 1.5 multiplier, बाकी पर legInToBaseSizeMult
             effectiveLegInToBaseMult = (
                 p["legInToBaseSizeMultSingleBase"] if baseCount == 1
                 else p["legInToBaseSizeMult"]
@@ -355,7 +368,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             passesTRHierarchy = (legOutTR >= p["legOutMinTrRatio"] * legInTR) and (legInTR > maxBaseTR)
             passesVolume = legOutVol > legInVol
 
-            # ---------------- OVERNIGHT/MULTI-DAY GAP पहचान ----------------
+            # ---------------- OVERNIGHT/MULTI-DAY GAP पहचान (Pine isOvernightGap() जैसा) ----------------
             isOvernightGap = False
             if bar_dates is not None:
                 try:
@@ -363,30 +376,22 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 except Exception:
                     isOvernightGap = False
 
-            # ---------------- [CHANGED v9.2] प्राइस इमबैलेंस/GAP चेकिंग ----------------
-            # नई genuine-gap definition: Base(adjacent)-Close vs Leg-Out-Open
+            # ---------------- [CHANGED v9.3] प्राइस इमबैलेंस/GAP चेकिंग (Pine parity) ----------------
+            # hasImbalance = gapCond (कोई gap-size cap नहीं — v9.2 का cap हटाया गया)
             hasImbalance = True
             hasGenuineGap = False
             gapSize = 0.0
-            baseCloseAdjacent = c[t - 1]   # [NEW v9.2] Leg-Out से सटी हुई Base कैंडल का Close
-            legInCap = p["maxImbalanceVsLegInMult"] * legInTR
-            if isOvernightGap and p.get("relaxGapCapOnOvernight", True):
-                gapCap = float("inf")
-            else:
-                gapCap = legInCap
             if p["useImbalance"]:
                 if isDemandLegOut:
-                    hasGenuineGap = legOutOpen > baseCloseAdjacent          # [CHANGED v9.2]
+                    hasGenuineGap = legOutLow > maxBaseHigh
                     gapCond = hasGenuineGap or (legOutClose > legInHigh)
-                    gapSize = max(0.0, legOutOpen - baseCloseAdjacent)      # [CHANGED v9.2]
-                    hasImbalance = gapCond and (gapSize <= gapCap)
+                    gapSize = max(0.0, legOutLow - maxBaseHigh)
+                    hasImbalance = gapCond
                 elif isSupplyLegOut:
-                    hasGenuineGap = legOutOpen < baseCloseAdjacent          # [CHANGED v9.2]
+                    hasGenuineGap = legOutHigh < minBaseLow
                     gapCond = hasGenuineGap or (legOutClose < legInLow)
-                    gapSize = max(0.0, baseCloseAdjacent - legOutOpen)      # [CHANGED v9.2]
-                    hasImbalance = gapCond and (gapSize <= gapCap)
-                if hasGenuineGap and gapSize > gapCap:
-                    hasGenuineGap = False
+                    gapSize = max(0.0, minBaseLow - legOutHigh)
+                    hasImbalance = gapCond
 
             # ---------------- Leg-Out की BODY पूरे base-zone को engulf ना करे ----------------
             legOutBodyHigh = max(legOutOpen, legOutClose)
@@ -467,7 +472,7 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
             else:
                 legOutMidLevel = legOutLow + p["testedLegOutRetracePct"] * (legOutHigh - legOutLow)
 
-            # ---------------- डुप्लीकेट ज़ोन फिल्टर (यथावत) ----------------
+            # ---------------- डुप्लीकेट ज़ोन फिल्टर (यथावत — Pine active_zones loop जैसा) ----------------
             isDuplicate = False
             checked = 0
             for checkZ in reversed(zones):
@@ -516,14 +521,15 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                 timestamp=df.index[t],
                 legOutHigh=legOutHigh, legOutLow=legOutLow, legOutMidLevel=legOutMidLevel,
                 isOvernightGap=isOvernightGap, legInTR=legInTR, legOutTR=legOutTR,
+                hasGenuineGap=hasGenuineGap, gapSize=gapSize,
                 reformedAfterBreak=reformedAfterBreak,
             )
             zones.append(newZone)
             active_zones.append(newZone)
 
-        # ---------------- [CHANGED v9.2] ज़ोन स्टेटस ट्रैकिंग ----------------
-        # Fresh -> Tested अब "proxVal" टच होने पर होता है (पहले legOutMidLevel था)
-        # Tested -> Broken अब भी "distVal" टूटने पर ही होता है (यथावत)
+        # ---------------- [CHANGED v9.3] ज़ोन स्टेटस ट्रैकिंग (Pine parity) ----------------
+        # Fresh -> Tested फिर से "legOutMidLevel" टच होने पर (Pine जैसा)
+        # Tested -> Broken अब भी "distVal" टूटने पर (यथावत)
         if active_zones:
             lo_t, hi_t = l[t], h[t]
             still_active = []
@@ -532,25 +538,25 @@ def scan_zones(df: pd.DataFrame, params: Optional[dict] = None,
                     if z.isDemand:
                         if lo_t <= z.distVal:
                             z.state = "Broken"
-                        elif lo_t <= z.proxVal:              # [CHANGED v9.2] proxVal टच
+                        elif lo_t <= z.legOutMidLevel:          # [CHANGED v9.3] legOutMidLevel टच
                             z.state = "Tested"
                             z.touchCount += 1
                     else:
                         if hi_t >= z.distVal:
                             z.state = "Broken"
-                        elif hi_t >= z.proxVal:               # [CHANGED v9.2] proxVal टच
+                        elif hi_t >= z.legOutMidLevel:           # [CHANGED v9.3] legOutMidLevel टच
                             z.state = "Tested"
                             z.touchCount += 1
                 elif z.state == "Tested":
                     if z.isDemand:
                         if lo_t <= z.distVal:
                             z.state = "Broken"
-                        elif lo_t <= z.proxVal:               # [CHANGED v9.2]
+                        elif lo_t <= z.legOutMidLevel:           # [CHANGED v9.3]
                             z.touchCount += 1
                     else:
                         if hi_t >= z.distVal:
                             z.state = "Broken"
-                        elif hi_t >= z.proxVal:                # [CHANGED v9.2]
+                        elif hi_t >= z.legOutMidLevel:            # [CHANGED v9.3]
                             z.touchCount += 1
                 if z.state == "Tested" and z.touchCount > p["maxTestedCount"]:
                     z.state = "Broken"
@@ -648,14 +654,15 @@ def zone_highlight_tags(z: Zone) -> List[str]:
 
 
 # --------------------------------------------------------------------------
-# डायग्नोस्टिक/ट्रबलशूटिंग हेल्पर (v9.2 — दोनों बदलाव सिंक किए गए)
+# डायग्नोस्टिक/ट्रबलशूटिंग हेल्पर (v9.3 — सभी बदलाव सिंक किए गए)
 # --------------------------------------------------------------------------
 def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> List[Dict[str, Any]]:
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
-    p["maxBaseCount"] = min(int(p["maxBaseCount"]), _HARD_MAX_BASE_COUNT)
-    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), p["maxBaseCount"]))
+    raw_max_base = int(p["maxBaseCount"])
+    p["minBaseCount"] = max(1, min(int(p["minBaseCount"]), raw_max_base))
+    p["maxBaseCount"] = min(raw_max_base, _HARD_MAX_BASE_COUNT)
     o, h, l, c, v, true_range, atr, vol_sma = _prep_arrays(df, p)
     bar_dates = _bar_dates_array(df)
     if isinstance(at_index, (int, np.integer)):
@@ -737,6 +744,7 @@ def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> L
         rep["maxBaseTR"] = maxBaseTR
         rep["base_all_valid(<=ATR)"] = allBaseValid
 
+        # [Pine parity] baseCount==1 पर 1.5, बाकी पर legInToBaseSizeMult
         effMult = p["legInToBaseSizeMultSingleBase"] if baseCount == 1 else p["legInToBaseSizeMult"]
         rep["legInToBaseMult_used"] = effMult
         rep["legIn_gte_2xBase"] = legInTR >= (effMult * maxBaseTR) if maxBaseTR else False
@@ -761,23 +769,19 @@ def diagnose_bar(df: pd.DataFrame, at_index, params: Optional[dict] = None) -> L
                 isOvernightGap = False
         rep["isOvernightGap"] = isOvernightGap
 
-        # [CHANGED v9.2] नई genuine-gap definition — diagnose_bar में भी सिंक
-        baseCloseAdjacent = c[t - 1]
-        rep["baseCloseAdjacent"] = baseCloseAdjacent
-        legInCap = p["maxImbalanceVsLegInMult"] * legInTR
-        gapCap = float("inf") if (isOvernightGap and p.get("relaxGapCapOnOvernight", True)) else legInCap
+        # [CHANGED v9.3] Pine parity genuine-gap definition — diagnose_bar में भी सिंक
         hasGenuineGap = False; gapSize = 0.0; hasImbalance = True
         if p["useImbalance"]:
             if isDemandLegOut:
-                hasGenuineGap = legOutOpen > baseCloseAdjacent                # [CHANGED v9.2]
+                hasGenuineGap = legOutLow > maxBaseHigh
                 gapCond = hasGenuineGap or (legOutClose > legInHigh)
-                gapSize = max(0.0, legOutOpen - baseCloseAdjacent)            # [CHANGED v9.2]
-                hasImbalance = gapCond and (gapSize <= gapCap)
+                gapSize = max(0.0, legOutLow - maxBaseHigh)
+                hasImbalance = gapCond
             elif isSupplyLegOut:
-                hasGenuineGap = legOutOpen < baseCloseAdjacent                # [CHANGED v9.2]
+                hasGenuineGap = legOutHigh < minBaseLow
                 gapCond = hasGenuineGap or (legOutClose < legInLow)
-                gapSize = max(0.0, baseCloseAdjacent - legOutOpen)            # [CHANGED v9.2]
-                hasImbalance = gapCond and (gapSize <= gapCap)
+                gapSize = max(0.0, minBaseLow - legOutHigh)
+                hasImbalance = gapCond
         rep["gapSize"] = gapSize
         rep["hasGenuineGap"] = hasGenuineGap
         rep["imbalance_ok"] = hasImbalance
