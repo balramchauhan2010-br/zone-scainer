@@ -1,0 +1,6 @@
+streamlit>=1.41,<2
+streamlit-autorefresh>=1.0.1,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+yfinance>=0.2.54,<1
+tzdata>=2024.1
